@@ -183,8 +183,14 @@ def _ago(sec) -> str:
     if s < 3600:
         return f"{int(s // 60)}m"
     if s < 86400:
-        return f"{int(s // 3600)}h"
-    return f"{int(s // 86400)}d"
+        # Minutes matter here. Flooring to whole hours made the planner read as
+        # self-contradictory: "1h of runway against a p90 agent of 36m" next to
+        # a verdict of "safe to fan out" is correct when the runway is really
+        # 1h54m, and looks like a bug when it says 1h.
+        h, m = int(s // 3600), int((s % 3600) // 60)
+        return f"{h}h{m:02d}m" if m else f"{h}h"
+    d, h = int(s // 86400), int((s % 86400) // 3600)
+    return f"{d}d{h}h" if h else f"{d}d"
 
 
 def _k(n) -> str:
@@ -233,6 +239,67 @@ def _hud_cache_for(transcript_path: str) -> dict | None:
 
 # ------------------------------------------------------- transcript source
 
+AGENT_LOG_MAX_BYTES = 262144
+
+
+def agent_log_path() -> Path:
+    return STATE_DIR / "agent-durations.jsonl"
+
+
+def record_agent_duration(bid: str, end_t: float, seconds: float,
+                          label: str = "") -> None:
+    """Append one completed agent run.
+
+    Durations were previously derived only from the current 5-hour window, so
+    n was routinely 1 or 2 and every verdict carried LOW CONFIDENCE. A run that
+    completed 20 minutes before the window opened is still the best evidence
+    available for how long the next one will take.
+
+    Append-only and deduped on read rather than on write: a background agent
+    produces a provisional end (its tool_result, which is really dispatch) and
+    later a true end (its task-notification), and taking the max per id
+    resolves that without needing to rewrite rows.
+    """
+    if not bid or seconds <= 0:
+        return
+    try:
+        p = agent_log_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        if p.exists() and p.stat().st_size > AGENT_LOG_MAX_BYTES:
+            keep = p.read_text(encoding="utf-8").splitlines()[-600:]
+            with open(p, "w", encoding="utf-8", newline="\n") as f:
+                f.write("\n".join(keep) + "\n")
+        with open(p, "a", encoding="utf-8", newline="\n") as f:
+            f.write(json.dumps({"id": bid, "t": round(end_t, 1),
+                                "s": round(seconds, 1), "l": label[:40]}) + "\n")
+    except OSError:
+        pass
+
+
+def agent_history(days: float = 30.0) -> list:
+    """Durations of completed agent runs, most recent first.
+
+    Keeps the LONGEST duration recorded per id: for a background agent the
+    task-notification supersedes the tool_result, which only measured dispatch.
+    """
+    cutoff = time.time() - days * 86400
+    best: dict[str, dict] = {}
+    try:
+        for line in agent_log_path().read_text(encoding="utf-8").splitlines():
+            try:
+                r = json.loads(line)
+            except ValueError:
+                continue
+            if (r.get("t") or 0) < cutoff or not r.get("id"):
+                continue
+            prev = best.get(r["id"])
+            if prev is None or (r.get("s") or 0) > (prev.get("s") or 0):
+                best[r["id"]] = r
+    except OSError:
+        return []
+    return sorted(best.values(), key=lambda r: -(r.get("t") or 0))
+
+
 def _scan_state_path(sid8: str) -> Path:
     return STATE_DIR / f"scan-{sid8}.json"
 
@@ -249,7 +316,8 @@ def _scan_transcript(path: str, sid8: str) -> dict:
     subagent corrects itself on the next read instead of drifting forever.
     """
     empty = {"size": 0, "ctx": 0, "out": 0, "last_usage_off": 0, "turns": 0,
-             "open_agents": [], "agents_total": 0, "seen_agents": []}
+             "open_agents": [], "agents_total": 0, "seen_agents": [],
+             "agent_starts": {}}
     if not path:
         return empty
     p = Path(path)
@@ -269,6 +337,9 @@ def _scan_transcript(path: str, sid8: str) -> dict:
 
     open_agents = set(st.get("open_agents") or [])
     seen_agents = set(st.get("seen_agents") or [])
+    # id -> first-seen timestamp, carried across incremental scans so a run
+    # that started before this scan resumed can still be measured.
+    agent_starts = dict(st.get("agent_starts") or {})
     try:
         with p.open("rb") as f:
             f.seek(start)
@@ -280,6 +351,17 @@ def _scan_transcript(path: str, sid8: str) -> dict:
                 try:
                     r = json.loads(raw.decode("utf-8", "replace"))
                 except ValueError:
+                    continue
+                rec_t = _iso_epoch(r.get("timestamp") or "")
+                if r.get("type") == "queue-operation":
+                    c = r.get("content") or ""
+                    if "<task-notification>" in c and rec_t:
+                        m = re.search(r"<tool-use-id>([^<]+)</tool-use-id>", c)
+                        if m:
+                            bid = m.group(1).strip()
+                            start = agent_starts.get(bid)
+                            if start:
+                                record_agent_duration(bid, rec_t, rec_t - start)
                     continue
                 if r.get("type") == "user" and not r.get("isSidechain"):
                     msg = r.get("message") or {}
@@ -311,8 +393,17 @@ def _scan_transcript(path: str, sid8: str) -> dict:
                             if bid and bid not in seen_agents:
                                 seen_agents.add(bid)
                                 open_agents.add(bid)
+                                if rec_t:
+                                    agent_starts[bid] = rec_t
                         elif blk.get("type") == "tool_result":
-                            open_agents.discard(blk.get("tool_use_id"))
+                            rid = blk.get("tool_use_id")
+                            open_agents.discard(rid)
+                            # Provisional: for a background agent this is
+                            # dispatch, not completion. The later notification
+                            # supersedes it because reads take the max per id.
+                            start = agent_starts.get(rid)
+                            if start and rec_t and rec_t > start:
+                                record_agent_duration(rid, rec_t, rec_t - start)
     except OSError as e:
         _log(f"scan failed: {e!r}")
         return st
@@ -321,6 +412,9 @@ def _scan_transcript(path: str, sid8: str) -> dict:
     st["open_agents"] = [a for a in open_agents if a]
     st["seen_agents"] = sorted(a for a in seen_agents if a)
     st["agents_total"] = len(st["seen_agents"])
+    # Bounded: only ids still plausibly in flight need their start time kept.
+    cutoff = time.time() - 86400
+    st["agent_starts"] = {k: v for k, v in agent_starts.items() if v >= cutoff}
     out = dict(st)
     out["path"] = path
     _atomic_write(_scan_state_path(sid8), out)
@@ -527,7 +621,7 @@ def status_line(snap: dict) -> str:
     unc_s = f" (+≤{_k(unc)} uncounted)" if unc >= 1500 else ""
     agents = snap.get("agents_running") or 0
     agent_s = f" · {agents} agent{'s' if agents != 1 else ''} running" if agents else ""
-    advice = f" — {snap['advice']}" if snap.get("advice") else ""
+    advice = f": {snap['advice']}" if snap.get("advice") else ""
     return (f"[ctx] {_k(ctx)}/{_k(win)} ({snap['ctx_pct']}%){unc_s} · "
             f"{_k(snap['headroom_tokens'])} safe headroom · "
             f"out {_k(snap['out_total'])}{agent_s}{_quota_str(snap)} · "
@@ -766,6 +860,11 @@ def scan_window(window_start: float) -> dict:
             end = notified.get(bid) or results.get(bid)
             if end and st and end > st:
                 out["agent_durations"].append(end - st)
+                # Backfill the rolling log. The per-session incremental scan
+                # only sees bytes written after it last ran, so without this a
+                # freshly installed ctxmon would have no history at all until
+                # new agents happened to run.
+                record_agent_duration(bid, end, end - st)
             else:
                 out["open_agents"] += 1
         if touched:
@@ -842,32 +941,39 @@ def cmd_plan(args) -> int:
             print(f"projected       quota exhausted in {_ago(exhaust_in)}"
                   + (f" · window resets in {_ago(reset_in)}" if reset_in and reset_in > 0 else ""))
 
-    durs = w["agent_durations"]
+    # The rolling log spans windows; the window scan sees only this one. Prefer
+    # whichever has more evidence, and say which was used.
+    hist = [r["s"] for r in agent_history() if isinstance(r.get("s"), (int, float))]
+    if len(hist) >= len(w["agent_durations"]):
+        durs, scope = hist, "rolling"
+    else:
+        durs, scope = w["agent_durations"], "this window"
     p50, p90 = _pctile(durs, 0.5), _pctile(durs, 0.9)
     if durs:
-        print(f"agent duration  n={len(durs)}  median {_ago(p50)}  p90 {_ago(p90)}"
+        print(f"agent duration  n={len(durs)} ({scope})  median {_ago(p50)}  "
+              f"p90 {_ago(p90)}"
               + (f"  ({w['open_agents']} still running)" if w["open_agents"] else "")
               + ("  LOW CONFIDENCE (n<3)" if len(durs) < 3 else ""))
     else:
-        print("agent duration  no completed agent runs in this window")
+        print("agent duration  no completed agent runs recorded yet")
 
     print()
     limit_s = min([x for x in (exhaust_in, reset_in) if x and x > 0], default=None)
     if limit_s is None:
-        print("VERDICT  no binding limit measurable yet — proceed, and re-run "
+        print("VERDICT  no binding limit measurable yet. Proceed, and re-run "
               "once the quota history has a few samples.")
     elif p90 is None:
         print(f"VERDICT  {_ago(limit_s)} of runway. No agent-duration history "
               f"to compare against, so size work conservatively.")
     elif p90 < limit_s * 0.5:
         print(f"VERDICT  safe to fan out. {_ago(limit_s)} of runway against a "
-              f"p90 agent of {_ago(p90)} — a full wave finishes with margin.")
+              f"p90 agent of {_ago(p90)}, so a full wave finishes with margin.")
     elif p90 < limit_s:
         print(f"VERDICT  one wave only. {_ago(limit_s)} of runway against a p90 "
               f"agent of {_ago(p90)}: start the wave now, do not queue a second.")
     else:
         print(f"VERDICT  do NOT start agent work. {_ago(limit_s)} of runway is "
-              f"shorter than a p90 agent run ({_ago(p90)}) — an agent killed "
+              f"shorter than a p90 agent run ({_ago(p90)}). An agent killed "
               f"mid-flight returns nothing and its quota is spent anyway. "
               f"Do short inline work, or wait for the reset.")
     if exhaust_in and reset_in and exhaust_in < reset_in:
@@ -940,7 +1046,7 @@ def cmd_tick(_args) -> int:
             _band_path(sid8).write_text(snap["band"], encoding="utf-8")
         except OSError:
             pass
-        msgs.append(f"[ctx] crossed into {snap['band']} — {status_line(snap)}")
+        msgs.append(f"[ctx] crossed into {snap['band']}: {status_line(snap)}")
 
     prev_unc = snap.get("uncounted_est") or 0
     if prev_unc >= BIG_RESULT_TOKENS and now_i <= seen_i:
@@ -1147,7 +1253,7 @@ def build_trail(path: str, limit: int = 400) -> str:
                 marks.append(f"written x{rec['write']}")
             if rec["read"]:
                 marks.append(f"read x{rec['read']}")
-            out.append(f"- `{fp}` — {', '.join(marks)}")
+            out.append(f"- `{fp}`: {', '.join(marks)}")
         out += note(min(limit, len(ranked)), len(ranked)) + [""]
     if agents:
         out += ["## Agents dispatched", ""]
@@ -1194,7 +1300,7 @@ def cmd_precompact(_args) -> int:
     _emit("PreCompact",
           "[ctx] Compaction starting. The provenance trail (files read, "
           "commands run, agents dispatched) has been written to "
-          f"{trail_path if trail else 'nowhere — scan failed'}.")
+          f"{trail_path if trail else 'nowhere: the scan failed'}.")
     return 0
 
 
@@ -1240,8 +1346,8 @@ def cmd_sessionstart(_args) -> int:
     if not ck:
         return 0
     trail = ck.get("trail") or ""
-    trail_note = (f" The provenance trail for everything before the summary — "
-                  f"files read, commands run, agents dispatched — is at {trail}. "
+    trail_note = (f" The provenance trail for everything before the summary "
+                  f"(files read, commands run, agents dispatched) is at {trail}. "
                   f"Read it before concluding a detail was lost."
                   if trail else "")
     _emit("SessionStart",

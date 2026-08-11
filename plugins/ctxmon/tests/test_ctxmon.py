@@ -820,6 +820,85 @@ class TestWindowSize(Base):
         self.assertEqual(snap["source"], "hud")
         self.assertEqual(snap["ctx_tokens"], 300_000)
 
+class TestAgentDurationLog(Base):
+    """Durations used to come only from the current 5-hour window, so n was
+    routinely 1 or 2 and every verdict read LOW CONFIDENCE. A run that finished
+    20 minutes before the window opened is still the best evidence available."""
+
+    def _blk(self, bid):
+        return [{"type": "tool_use", "id": bid, "name": "Agent", "input": {}}]
+
+    def _result(self, bid, ts):
+        return {"type": "user", "timestamp": ts,
+                "message": {"content": [{"type": "tool_result",
+                                         "tool_use_id": bid}]}}
+
+    def _notify(self, bid, ts):
+        return {"type": "queue-operation", "operation": "enqueue",
+                "timestamp": ts,
+                "content": ("<task-notification>\n<task-id>x</task-id>\n"
+                            f"<tool-use-id>{bid}</tool-use-id>\n"
+                            "<status>completed</status>\n")}
+
+    def test_background_agent_true_duration_supersedes_dispatch(self):
+        """tool_result is dispatch (~2s) for a background agent; the later
+        notification is the real end. Reads take the max per id."""
+        p = self.write_transcript([
+            assistant(content=self._blk("b1"), ts="2026-08-10T12:00:00.000Z"),
+            self._result("b1", "2026-08-10T12:00:02.000Z"),
+            self._notify("b1", "2026-08-10T12:45:00.000Z"),
+        ])
+        ctxmon._scan_transcript(p, "agt1")
+        hist = ctxmon.agent_history()
+        self.assertEqual(len(hist), 1, "one run, not two rows")
+        self.assertAlmostEqual(hist[0]["s"], 2700.0, places=1)
+
+    def test_synchronous_agent_recorded_from_its_result(self):
+        p = self.write_transcript([
+            assistant(content=self._blk("s1"), ts="2026-08-10T12:00:00.000Z"),
+            self._result("s1", "2026-08-10T12:03:00.000Z"),
+        ])
+        ctxmon._scan_transcript(p, "agt2")
+        self.assertAlmostEqual(ctxmon.agent_history()[0]["s"], 180.0, places=1)
+
+    def test_history_accumulates_across_separate_sessions(self):
+        for i, sid in enumerate(("agt3", "agt4")):
+            p = self.write_transcript([
+                assistant(content=self._blk(f"m{i}"), ts="2026-08-10T12:00:00.000Z"),
+                self._notify(f"m{i}", "2026-08-10T12:10:00.000Z"),
+            ], name=f"s{i}.jsonl")
+            ctxmon._scan_transcript(p, sid)
+        self.assertEqual(len(ctxmon.agent_history()), 2)
+
+    def test_incremental_scan_still_measures_a_run_it_did_not_start(self):
+        """The start timestamp must survive between scans, or a run spanning
+        two hook invocations is never measured at all."""
+        p = self.write_transcript([
+            assistant(content=self._blk("i1"), ts="2026-08-10T12:00:00.000Z"),
+        ])
+        ctxmon._scan_transcript(p, "agt5")
+        self.assertEqual(ctxmon.agent_history(), [])
+        with open(p, "a", encoding="utf-8") as f:
+            f.write(json.dumps(self._notify("i1", "2026-08-10T12:30:00.000Z")) + "\n")
+        ctxmon._scan_transcript(p, "agt5")
+        hist = ctxmon.agent_history()
+        self.assertEqual(len(hist), 1)
+        self.assertAlmostEqual(hist[0]["s"], 1800.0, places=1)
+
+    def test_entries_older_than_the_window_are_excluded(self):
+        ctxmon.record_agent_duration("old", time.time() - 40 * 86400, 600.0)
+        ctxmon.record_agent_duration("new", time.time() - 3600, 900.0)
+        ids = [r["id"] for r in ctxmon.agent_history(days=30)]
+        self.assertEqual(ids, ["new"])
+
+    def test_zero_and_negative_durations_are_not_recorded(self):
+        ctxmon.record_agent_duration("z", time.time(), 0.0)
+        ctxmon.record_agent_duration("n", time.time(), -5.0)
+        self.assertEqual(ctxmon.agent_history(), [])
+
+    def test_missing_log_is_not_an_error(self):
+        self.assertEqual(ctxmon.agent_history(), [])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

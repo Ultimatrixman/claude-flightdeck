@@ -6,7 +6,7 @@
   },
   "metadata": {
     "description": "Instruments for running Claude Code sessions: context and quota telemetry, and a channel between concurrent sessions.",
-    "version": "0.1.4"
+    "version": "0.1.5"
   },
   "plugins": [
     {
