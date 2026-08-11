@@ -66,7 +66,12 @@ if [ -r "$inner_file" ]; then
   fi
 else
   # No setup record: fall back to claude-hud if it happens to be installed.
-  plugin_dir=$(ls -1d "$cfg"/plugins/cache/*/claude-hud/*/ 2>/dev/null | sort -V | tail -1)
+  # The glob is expanded by the shell rather than parsed out of `ls`, and
+  # sort -V picks the highest version (0.10.0 must beat 0.9.0, which plain
+  # lexicographic ordering gets wrong). An unmatched glob yields the literal
+  # pattern, which the -f test below rejects.
+  plugin_dir=$(printf '%s\n' "$cfg"/plugins/cache/*/claude-hud/*/ 2>/dev/null \
+               | sort -V | tail -1)
   node_bin="/c/Program Files/nodejs/node.exe"
   [ -x "$node_bin" ] || node_bin=$(command -v node 2>/dev/null)
   if [ -n "$plugin_dir" ] && [ -f "${plugin_dir}dist/index.js" ] && [ -n "$node_bin" ]; then
