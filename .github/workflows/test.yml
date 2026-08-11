@@ -31,6 +31,12 @@ jobs:
         shell: bash
         run: bash tests/integration.sh
 
+      # setup edits the user's settings.json, the one file they cannot easily
+      # reconstruct, so it is exercised on every platform too.
+      - name: setup integration (settings.json round trip)
+        shell: bash
+        run: bash tests/integration_setup.sh
+
       - name: every module imports and compiles
         run: |
           python -m py_compile plugins/ctxmon/ctxmon.py plugins/ipc/ipc.py plugins/ipc/relay.py tools/build_bundle.py install.py

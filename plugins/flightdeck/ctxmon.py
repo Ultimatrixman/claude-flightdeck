@@ -1360,6 +1360,124 @@ def cmd_peers(args) -> int:
     return 0
 
 
+STATUSLINE_CMD = ('bash "${CLAUDE_CONFIG_DIR:-$HOME/.claude}'
+                  '/flightdeck/statusline.sh"')
+
+
+def _settings_path() -> Path:
+    return CLAUDE_DIR / "settings.json"
+
+
+def _is_ours(cmd: str) -> bool:
+    return "flightdeck/statusline.sh" in (cmd or "")
+
+
+def cmd_setup(args) -> int:
+    """Install the statusline wrapper, which is the one thing a plugin cannot
+    do for itself: quota reaches only the statusline command, and plugin
+    settings.json supports no statusLine key.
+
+    This was prose in a command file until it produced a real bug. The prose
+    said to point statusLine at the plugin's own copy of the script, and that
+    path carries the plugin version, so the next upgrade would have moved it
+    and silently killed both the statusline and quota capture. Code cannot
+    drift from itself the way an instruction drifts from what it describes.
+    """
+    src = CTXMON_DIR / "statusline.sh"
+    if not src.is_file():
+        print(f"error: {src} not found; is this running from the plugin?")
+        return 1
+
+    p = _settings_path()
+    try:
+        settings = json.loads(p.read_text(encoding="utf-8")) if p.is_file() else {}
+    except ValueError as e:
+        print(f"error: {p} is not valid JSON ({e}).\n"
+              f"Fix or move it first; setup will not overwrite a file it "
+              f"cannot parse.")
+        return 1
+
+    current = (settings.get("statusLine") or {}).get("command", "")
+    # The wrapper lives OUTSIDE the plugin directory on purpose:
+    # ${CLAUDE_PLUGIN_ROOT} carries the version and moves on every upgrade.
+    dst = FLIGHTDECK_DIR / "statusline.sh"
+    inner = STATE_DIR / "statusline-inner.sh"
+
+    if args.uninstall:
+        if not _is_ours(current):
+            print("statusline is not ctxmon's; nothing to undo")
+            return 0
+        prev = ""
+        try:
+            prev = inner.read_text(encoding="utf-8").strip()
+        except OSError:
+            pass
+        if prev:
+            settings["statusLine"] = {"type": "command", "command": prev}
+            note = "restored your previous statusline"
+        else:
+            settings.pop("statusLine", None)
+            note = "removed the statusLine entry (there was none before)"
+    else:
+        if _is_ours(current):
+            # Refresh the copy: an upgraded plugin ships a newer wrapper.
+            note = "already installed; refreshed the wrapper from this version"
+        else:
+            # An EMPTY inner file means "there was no statusline", which is not
+            # the same as the file being absent (absent means look for
+            # claude-hud). Write it either way.
+            note = ("wrapped your existing statusline" if current
+                    else "installed (you had no statusline)")
+            if not args.dry_run:
+                inner.parent.mkdir(parents=True, exist_ok=True)
+                with open(inner, "w", encoding="utf-8", newline="\n") as f:
+                    f.write(current)
+        settings["statusLine"] = {"type": "command", "command": STATUSLINE_CMD}
+
+    if args.dry_run:
+        print(f"would write {p}")
+        print(f"  statusLine -> {(settings.get('statusLine') or {}).get('command', '(removed)')}")
+        print(f"  wrapper    -> {dst}")
+        print(f"  note       -> {note}")
+        return 0
+
+    if p.is_file():
+        bak = p.with_suffix(p.suffix + f".bak.flightdeck-"
+                                       f"{time.strftime('%Y%m%d-%H%M%S')}")
+        try:
+            bak.write_bytes(p.read_bytes())
+            print(f"backup   {bak}")
+        except OSError as e:
+            print(f"error: could not back up {p} ({e}); refusing to write")
+            return 1
+
+    if not args.uninstall:
+        try:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            dst.write_bytes(src.read_bytes())
+            try:
+                os.chmod(dst, 0o755)
+            except OSError:
+                pass
+        except OSError as e:
+            print(f"error: could not install the wrapper to {dst} ({e})")
+            return 1
+        print(f"wrapper  {dst}")
+
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
+    except OSError as e:
+        print(f"error: could not write {p} ({e})")
+        return 1
+    print(f"settings {p}")
+    print(f"         {note}")
+    print("\nRestart Claude Code for the change to take effect. Your existing "
+          "statusline is unchanged: the wrapper captures the payload and hands "
+          "the identical bytes straight through to it.")
+    return 0
+
+
 def cmd_doctor(_args) -> int:
     """Report which sources are reachable — run this when a number looks wrong."""
     print(f"state dir        {STATE_DIR}  exists={STATE_DIR.exists()}")
@@ -1401,6 +1519,9 @@ def main() -> int:
     p.add_argument("--max-age", type=float, default=86400)
     sub.add_parser("doctor")
     sub.add_parser("plan")
+    p = sub.add_parser("setup")
+    p.add_argument("--uninstall", action="store_true")
+    p.add_argument("--dry-run", action="store_true")
     p = sub.add_parser("harvest")
     p.add_argument("--session")
     args = ap.parse_args()
@@ -1409,7 +1530,7 @@ def main() -> int:
           "precompact": cmd_precompact, "sessionstart": cmd_sessionstart,
           "sessionend": cmd_sessionend, "status": cmd_status,
           "peers": cmd_peers, "doctor": cmd_doctor, "plan": cmd_plan,
-          "harvest": cmd_harvest}[args.cmd]
+          "harvest": cmd_harvest, "setup": cmd_setup}[args.cmd]
 
     if args.cmd in HOOK_CMDS:
         if _disabled():

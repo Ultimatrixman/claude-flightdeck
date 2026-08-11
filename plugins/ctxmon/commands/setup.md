@@ -1,50 +1,32 @@
 ---
 description: Wire the quota capture into your statusline (the one thing a plugin cannot install itself)
-argument-hint: ""
+argument-hint: "[--dry-run | --uninstall]"
 ---
 
-Install ctxmon's statusline wrapper.
+Run:
 
-Everything else in ctxmon works the moment the plugin is installed. This step
-exists for one reason: the 5-hour and 7-day **quota** figures are delivered by
-Claude Code *only* to the statusline command, and a plugin cannot ship a
-`statusLine`. Without this, context telemetry works and quota does not.
+```
+"${CLAUDE_PLUGIN_ROOT}/bin/ctxmon" setup $ARGUMENTS
+```
 
-Throughout, `<flightdeck>` means `$FLIGHTDECK_DIR`, else
-`$CLAUDE_CONFIG_DIR/flightdeck`, else `~/.claude/flightdeck`.
+(If that variable does not resolve in your shell, use this plugin's real
+installed path.)
 
-Do this:
+Show the user the output as-is, then stop. Do not edit `settings.json`
+yourself: the command backs the file up, preserves every other key, records
+whatever statusline was already there so it can be handed the payload
+untouched, and is safe to run twice.
 
-1. Read `~/.claude/settings.json` (or `$CLAUDE_CONFIG_DIR/settings.json`).
+Why this step exists at all: the 5-hour and 7-day **quota** figures are
+delivered by Claude Code only to the statusline command, and a plugin cannot
+ship a `statusLine` key. Everything else in ctxmon works without it. Context
+telemetry, the bands, the trail and the cross-session view all function; only
+quota and the planner need this.
 
-2. Note the current `statusLine.command`, if any.
-   - If it already ends in `flightdeck/statusline.sh`, tell the user it is
-     installed and stop.
+`--dry-run` prints what would change and writes nothing. `--uninstall` puts
+your previous statusline back.
 
-3. Back up the file to `settings.json.bak.flightdeck-<YYYYMMDD-HHMMSS>` and tell
-   the user the backup path.
-
-4. **Copy this plugin's `statusline.sh` to `<flightdeck>/statusline.sh`.**
-   Do not point `statusLine` at the file inside the plugin directory. That path
-   contains the plugin version (`.../flightdeck/0.1.1/statusline.sh`) and
-   changes on every update, which would break the statusline the next time the
-   plugin upgrades. The copy is version-stable; re-run this command after an
-   upgrade to refresh it.
-
-5. Write the previous command from step 2, verbatim and unmodified, to
-   `<flightdeck>/ctxmon/statusline-inner.sh`. Create the directory if needed.
-   **If there was no previous statusline, create the file empty** — an empty
-   file means "there was nothing", which is not the same as the file being
-   absent, and the wrapper distinguishes them.
-
-6. Set `statusLine` to:
-   ```json
-   { "type": "command", "command": "bash \"${CLAUDE_CONFIG_DIR:-$HOME/.claude}/flightdeck/statusline.sh\"" }
-   ```
-
-7. Tell the user to restart Claude Code, and that their existing statusline is
-   unchanged: the wrapper captures the payload and hands the identical bytes
-   straight through to it.
-
-To undo: restore `statusLine.command` from the backup, or from
-`<flightdeck>/ctxmon/statusline-inner.sh`.
+Re-run it after upgrading the plugin. The wrapper is installed to
+`<flightdeck>/statusline.sh` rather than referenced inside the plugin
+directory, because that path carries the plugin version and moves on every
+upgrade; re-running refreshes the copy.
