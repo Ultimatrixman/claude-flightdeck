@@ -1,0 +1,21 @@
+{
+  "name": "ctxmon",
+  "description": "Context and quota telemetry for Claude Code: per-turn budget status, threshold alarms, a scheduling planner for agent work, a cross-session view, and a provenance trail written before compaction.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Ultimatrixman",
+    "url": "https://github.com/Ultimatrixman"
+  },
+  "homepage": "https://github.com/Ultimatrixman/claude-flightdeck",
+  "repository": "https://github.com/Ultimatrixman/claude-flightdeck",
+  "license": "MIT",
+  "keywords": ["context", "quota", "budget", "compaction", "telemetry", "planning", "claude-code"],
+  "commands": [
+    "./commands/setup.md",
+    "./commands/status.md",
+    "./commands/plan.md",
+    "./commands/peers.md",
+    "./commands/harvest.md"
+  ],
+  "hooks": "./hooks/hooks.json"
+}

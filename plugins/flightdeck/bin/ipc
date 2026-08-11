@@ -1,0 +1,32 @@
+#!/usr/bin/env sh
+# Interpreter resolver for the IPC client. See plugins/ctxmon/bin/ctxmon for
+# why this indirection exists: hook commands are static JSON and cannot branch
+# on platform, `python3` is absent or a stub on most Windows installs, and `py`
+# exists only on Windows.
+#
+# Exits 0 on every failure path. A hook that returns non-zero can interrupt a
+# Claude Code session.
+
+dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd) || exit 0
+script="$dir/ipc.py"
+[ -f "$script" ] || exit 0
+
+usable() {
+    "$@" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)' \
+        >/dev/null 2>&1
+}
+
+if [ -n "$FLIGHTDECK_PYTHON" ] && usable $FLIGHTDECK_PYTHON; then
+    exec $FLIGHTDECK_PYTHON "$script" "$@"
+fi
+for candidate in python3 python; do
+    if command -v "$candidate" >/dev/null 2>&1 && usable "$candidate"; then
+        exec "$candidate" "$script" "$@"
+    fi
+done
+if command -v py >/dev/null 2>&1 && usable py -3; then
+    exec py -3 "$script" "$@"
+fi
+
+echo "ipc: no Python 3.9+ interpreter found; set FLIGHTDECK_PYTHON" >&2
+exit 0

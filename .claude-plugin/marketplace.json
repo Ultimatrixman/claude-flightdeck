@@ -1,0 +1,34 @@
+{
+  "name": "claude-flightdeck",
+  "owner": {
+    "name": "Ultimatrixman",
+    "url": "https://github.com/Ultimatrixman"
+  },
+  "metadata": {
+    "description": "Instruments for running Claude Code sessions: context and quota telemetry, and a channel between concurrent sessions.",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "ctxmon",
+      "source": "./plugins/ctxmon",
+      "description": "Makes a session see its own context budget, the machine's quota windows, and what every other session is doing - then warns early enough to write down what it learned before compaction takes it.",
+      "category": "monitoring",
+      "tags": ["context", "quota", "budget", "compaction", "telemetry", "planning"]
+    },
+    {
+      "name": "ipc",
+      "source": "./plugins/ipc",
+      "description": "A message channel between concurrent Claude Code sessions: peer discovery, work claims that warn before two sessions edit the same file, and a /ping /pong chat rally.",
+      "category": "workflow",
+      "tags": ["ipc", "multi-session", "coordination", "claims", "messaging"]
+    },
+    {
+      "name": "flightdeck",
+      "source": "./plugins/flightdeck",
+      "description": "Both plugins in one install: context and quota telemetry plus the cross-session channel. Equivalent to installing ctxmon and ipc separately.",
+      "category": "workflow",
+      "tags": ["bundle", "context", "quota", "ipc", "multi-session"]
+    }
+  ]
+}

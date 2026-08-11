@@ -1,0 +1,15 @@
+{
+  "name": "ipc",
+  "description": "A message channel between concurrent Claude Code sessions: peer discovery, advisory work claims that warn before two sessions edit the same file, and a /ping /pong chat rally.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Ultimatrixman",
+    "url": "https://github.com/Ultimatrixman"
+  },
+  "homepage": "https://github.com/Ultimatrixman/claude-flightdeck",
+  "repository": "https://github.com/Ultimatrixman/claude-flightdeck",
+  "license": "MIT",
+  "keywords": ["ipc", "multi-session", "coordination", "claims", "messaging", "claude-code"],
+  "commands": ["./commands/ping.md", "./commands/pong.md"],
+  "hooks": "./hooks/hooks.json"
+}

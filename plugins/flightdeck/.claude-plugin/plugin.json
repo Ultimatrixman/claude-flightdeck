@@ -1,0 +1,29 @@
+{
+  "name": "flightdeck",
+  "description": "Context and quota telemetry plus a cross-session message channel. Equivalent to installing ctxmon and ipc separately.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Ultimatrixman",
+    "url": "https://github.com/Ultimatrixman"
+  },
+  "homepage": "https://github.com/Ultimatrixman/claude-flightdeck",
+  "repository": "https://github.com/Ultimatrixman/claude-flightdeck",
+  "license": "MIT",
+  "keywords": [
+    "context",
+    "quota",
+    "ipc",
+    "multi-session",
+    "claude-code"
+  ],
+  "commands": [
+    "./commands/setup.md",
+    "./commands/status.md",
+    "./commands/plan.md",
+    "./commands/peers.md",
+    "./commands/harvest.md",
+    "./commands/ping.md",
+    "./commands/pong.md"
+  ],
+  "hooks": "./hooks/hooks.json"
+}

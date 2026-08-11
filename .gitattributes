@@ -1,0 +1,22 @@
+# LF everywhere, in the index AND in every working copy.
+#
+# This is not cosmetic. A shell script checked out with CRLF fails outright on
+# Linux and macOS -- `/usr/bin/env sh^M: bad interpreter` -- and confuses Git
+# Bash on Windows too. Since this repo is authored on Windows and consumed on
+# all three, `eol=lf` has to be pinned rather than left to core.autocrlf.
+* text=auto eol=lf
+
+*.sh    text eol=lf
+*.py    text eol=lf
+*.md    text eol=lf
+*.json  text eol=lf
+*.yml   text eol=lf
+
+# Extensionless shell wrappers.
+plugins/ctxmon/bin/ctxmon     text eol=lf
+plugins/ipc/bin/ipc           text eol=lf
+plugins/flightdeck/bin/ctxmon text eol=lf
+plugins/flightdeck/bin/ipc    text eol=lf
+
+*.png binary
+*.jpg binary

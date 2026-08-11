@@ -1,0 +1,38 @@
+#!/usr/bin/env sh
+# Interpreter resolver for ctxmon.
+#
+# Hook commands are static JSON, so the plugin cannot branch on platform. This
+# wrapper does it instead: `python3` is absent on most Windows installs (or is
+# a Store stub that exits without running anything), while `py` exists only on
+# Windows. Each candidate is version-checked before use, because `python` is
+# still Python 2 on some systems and would fail deep inside the script rather
+# than here.
+#
+# Exits 0 on every failure path. A hook that returns non-zero can interrupt a
+# Claude Code session, and no telemetry is worth that.
+
+dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd) || exit 0
+script="$dir/ctxmon.py"
+[ -f "$script" ] || exit 0
+
+usable() {
+    "$@" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)' \
+        >/dev/null 2>&1
+}
+
+if [ -n "$CTXMON_PYTHON" ] && usable $CTXMON_PYTHON; then
+    exec $CTXMON_PYTHON "$script" "$@"
+fi
+for candidate in python3 python; do
+    if command -v "$candidate" >/dev/null 2>&1 && usable "$candidate"; then
+        exec "$candidate" "$script" "$@"
+    fi
+done
+if command -v py >/dev/null 2>&1 && usable py -3; then
+    exec py -3 "$script" "$@"
+fi
+
+# Nothing usable. Say so once on stderr (hooks discard it; a human running the
+# command directly will see it) and succeed anyway.
+echo "ctxmon: no Python 3.9+ interpreter found; set CTXMON_PYTHON" >&2
+exit 0
