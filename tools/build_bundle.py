@@ -62,9 +62,6 @@ def _merged_hooks() -> dict:
                          .read_text(encoding="utf-8"))
         for event, entries in cfg.get("hooks", {}).items():
             for entry in entries:
-                for h in entry.get("hooks", []):
-                    h["command"] = h["command"].replace(
-                        "/bin/ctxmon", "/bin/ctxmon").replace("/bin/ipc", "/bin/ipc")
                 merged.setdefault(event, []).append(entry)
     # No extra top-level keys. A `_comment` banner here was the difference
     # between "Installed" and "the plugin couldn't be loaded": the hook config
