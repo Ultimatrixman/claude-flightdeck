@@ -146,8 +146,11 @@ def wire_statusline(settings: dict, state_dir: Path, dry: bool) -> str:
         # An EMPTY file means "there was no statusline", which the wrapper
         # treats differently from the file being absent (absent = fall back to
         # detecting claude-hud).
-        inner_file.write_text("" if is_ours_statusline(current) else current,
-                              encoding="utf-8")
+        #
+        # newline="\n" is not cosmetic: this file's contents are handed to
+        # `sh -c`, and a CRLF here would append a stray \r to the command.
+        with open(inner_file, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write("" if is_ours_statusline(current) else current)
     settings["statusLine"] = {"type": "command", "command": new_cmd}
     return (f"statusline: wrapped (previous command saved to {inner_file})"
             if current else

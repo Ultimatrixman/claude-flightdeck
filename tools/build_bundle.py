@@ -103,13 +103,25 @@ def build(target: Path) -> None:
             dst = target / rel
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(p, dst)
-    (target / ".claude-plugin" / "plugin.json").write_text(
-        json.dumps(_manifest(), indent=2) + "\n", encoding="utf-8")
-    (target / "hooks" / "hooks.json").write_text(
-        json.dumps(_merged_hooks(), indent=2) + "\n", encoding="utf-8")
-    (target / "GENERATED.md").write_text(
-        f"# {BANNER}\n\nRun `python3 tools/build_bundle.py` after changing "
-        f"either component.\n", encoding="utf-8")
+    _write(target / ".claude-plugin" / "plugin.json",
+           json.dumps(_manifest(), indent=2) + "\n")
+    _write(target / "hooks" / "hooks.json",
+           json.dumps(_merged_hooks(), indent=2) + "\n")
+    _write(target / "GENERATED.md",
+           f"# {BANNER}\n\nRun `python3 tools/build_bundle.py` after changing "
+           f"either component.\n")
+
+
+def _write(path: Path, text: str) -> None:
+    """Write with LF endings on every platform.
+
+    `Path.write_text` translates \\n to CRLF on Windows, so a bundle generated
+    there never byte-matches the LF-normalised copy in git and `--check`
+    reports it stale forever. `newline=` on write_text is 3.10+, and this
+    supports 3.9, hence open().
+    """
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
+        f.write(text)
 
 
 def _tree(d: Path) -> set[str]:

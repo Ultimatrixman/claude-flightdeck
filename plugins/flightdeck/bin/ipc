@@ -7,7 +7,7 @@
 # Exits 0 on every failure path. A hook that returns non-zero can interrupt a
 # Claude Code session.
 
-dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd) || exit 0
+dir=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd) || exit 0
 script="$dir/ipc.py"
 [ -f "$script" ] || exit 0
 
@@ -16,6 +16,9 @@ usable() {
         >/dev/null 2>&1
 }
 
+# FLIGHTDECK_PYTHON is deliberately unquoted: it may carry arguments, as in
+# `py -3` or `uv run python`, and must word-split.
+# shellcheck disable=SC2086
 if [ -n "$FLIGHTDECK_PYTHON" ] && usable $FLIGHTDECK_PYTHON; then
     exec $FLIGHTDECK_PYTHON "$script" "$@"
 fi
