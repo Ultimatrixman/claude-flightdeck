@@ -23,6 +23,14 @@ jobs:
       - name: ctxmon suite
         run: python plugins/ctxmon/tests/test_ctxmon.py
 
+      # The Python suite covers logic. This covers the shell layer between
+      # Claude Code and Python, which is where platform differences live and
+      # which no amount of unit testing on one OS can validate. `shell: bash`
+      # is required: the Windows runner would otherwise use pwsh.
+      - name: shell integration (wrappers + statusline)
+        shell: bash
+        run: bash tests/integration.sh
+
       - name: every module imports and compiles
         run: |
           python -m py_compile plugins/ctxmon/ctxmon.py plugins/ipc/ipc.py plugins/ipc/relay.py tools/build_bundle.py install.py
