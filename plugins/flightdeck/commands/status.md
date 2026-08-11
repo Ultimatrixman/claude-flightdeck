@@ -24,4 +24,4 @@ Show the output as-is. Two readings need care:
 
 If several sessions share this working directory, `status` may report a
 different one than you expect; pass `--session <id-prefix>`, or use
-`/ctxmon:peers`, which is unambiguous.
+the `peers` command, which is unambiguous.

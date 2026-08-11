@@ -28,4 +28,5 @@ Two things to read carefully rather than skim:
 - `LOW CONFIDENCE (n<3)` on agent duration means the estimate rests on almost
   no history. Treat the verdict as weak and size work conservatively.
 
-If quota is unknown, run `/ctxmon:setup` — quota reaches only the statusline.
+If quota is unknown, run this plugin's `setup` command: quota reaches only
+the statusline, so it has to be wired there.

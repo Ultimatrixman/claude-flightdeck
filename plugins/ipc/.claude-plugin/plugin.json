@@ -1,7 +1,7 @@
 {
   "name": "ipc",
   "description": "A message channel between concurrent Claude Code sessions: peer discovery, advisory work claims that warn before two sessions edit the same file, and a /ping /pong chat rally.",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "author": {
     "name": "Ultimatrixman",
     "url": "https://github.com/Ultimatrixman"

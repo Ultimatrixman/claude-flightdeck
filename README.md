@@ -109,7 +109,7 @@ The `ipc` plugin here is worth installing when you want:
   which paths. When another session is about to edit a file inside that claim, a
   `PreToolUse` guard warns it first. Claims go stale on their own, because a
   claim that warns forever trains everyone to ignore the guard.
-- **Phase and claims shown together** in `/ctxmon:peers`, so "who is busy" and
+- **Phase and claims shown together** in `peers`, so "who is busy" and
   "who owns this file" are one answer instead of two.
 
 It binds `127.0.0.1:4180` and runs a small relay daemon. That is a real decision,
@@ -129,7 +129,7 @@ Or pick one:
 /plugin install ipc@claude-flightdeck
 ```
 
-Then run **`/ctxmon:setup`** once. Everything works without it except quota: the
+Then run **`/flightdeck:setup`** once. Everything works without it except quota: the
 5-hour and 7-day figures are delivered by Claude Code only to the statusline
 command, and a plugin cannot ship a `statusLine`. Setup wraps whatever
 statusline you already have (including none) and passes the identical bytes
@@ -152,14 +152,19 @@ replacing them, and will not touch an entry it did not create.
 
 ## Commands
 
-| Command | What it answers |
+**Commands are namespaced by the plugin you installed**, not by the component
+they came from. Install the `flightdeck` bundle and they are `/flightdeck:*`.
+Install `ctxmon` and `ipc` separately and they are `/ctxmon:*` and `/ipc:*`.
+Type `/` and the plugin name to see them.
+
+| Command (bundle install) | What it answers |
 |---|---|
-| `/ctxmon:plan` | Can this work finish before the window closes |
-| `/ctxmon:status` | Where is this session's budget |
-| `/ctxmon:peers` | What is every other session doing |
-| `/ctxmon:harvest` | Write the provenance trail now |
-| `/ctxmon:setup` | Wire the quota capture into your statusline |
-| `/ping`, `/pong` | Open or close a chat rally with another session |
+| `/flightdeck:plan` | Can this work finish before the window closes |
+| `/flightdeck:status` | Where is this session's budget |
+| `/flightdeck:peers` | What is every other session doing |
+| `/flightdeck:harvest` | Write the provenance trail now |
+| `/flightdeck:setup` | Wire the quota capture into your statusline |
+| `/flightdeck:ping`, `/flightdeck:pong` | Open or close a chat rally with another session |
 
 The four bands are fractions of usable budget, so they mean the same thing on a
 200k window as on a 1M one:
@@ -179,7 +184,7 @@ verbatim**. Commands are scanned for credential-shaped strings (bearer tokens,
 before writing, but **redaction is pattern matching, not proof**. Treat a trail
 the way you treat your shell history.
 
-`/ctxmon:plan` reads transcript metadata across every project on the machine,
+The planner reads transcript metadata across every project on the machine,
 not only the current one, because quota is machine-wide. It reads token counts
 and timestamps, never message content.
 
