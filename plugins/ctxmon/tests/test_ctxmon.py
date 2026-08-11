@@ -736,5 +736,90 @@ class TestWindowSpend(Base):
         self.assertEqual(ctxmon.scan_window(0)["proxy_tokens"], 70)
 
 
+class TestWindowSize(Base):
+    """Regression (P0): window size was read only from claude-hud's cache, so a
+    user with just ctxmon installed fell back to DEFAULT_WINDOW. On a 1M
+    account that reported 130% used and forced HANDOFF at real usage of 26%."""
+
+    def _sl(self, sid8, window, ctx, age_s=0.0, quota=True):
+        ctxmon.SL_DIR.mkdir(parents=True, exist_ok=True)
+        payload = {"context_window": {"context_window_size": window,
+                                      "current_usage": {"cache_read_input_tokens": ctx}}}
+        if quota:
+            payload["rate_limits"] = {"five_hour": {"used_percentage": 20.0,
+                                                    "resets_at": time.time() + 3600}}
+        p = ctxmon.SL_DIR / f"{sid8}.json"
+        p.write_text(json.dumps(payload), encoding="utf-8")
+        if age_s:
+            old = time.time() - age_s
+            os.utime(p, (old, old))
+        return p
+
+    def _snap(self, sid8, transcript=None):
+        saved = ctxmon.HUD_DIR
+        ctxmon.HUD_DIR = self.root / "no-hud"          # claude-hud NOT installed
+        try:
+            return ctxmon.build_snapshot({"session_id": sid8 + "xxxx",
+                                          "transcript_path": transcript or "",
+                                          "cwd": ""})
+        finally:
+            ctxmon.HUD_DIR = saved
+
+    def test_window_and_usage_come_from_the_statusline_without_hud(self):
+        self._sl("aaaa0001", window=1_000_000, ctx=260_000)
+        snap = self._snap("aaaa0001")
+        self.assertEqual(snap["ctx_window"], 1_000_000)
+        self.assertEqual(snap["ctx_tokens"], 260_000)
+        self.assertEqual(snap["source"], "statusline")
+
+    def test_a_1m_session_at_26_percent_is_not_pushed_to_handoff(self):
+        # The transcript must carry the tokens too. Without it the pre-fix code
+        # reported ctx=0 and NORMAL for the wrong reason, and the test would
+        # have passed against the bug it exists to catch.
+        p = self.write_transcript([assistant(usage(260_000))])
+        self._sl("aaaa0002", window=1_000_000, ctx=260_000)
+        snap = self._snap("aaaa0002", transcript=p)
+        self.assertEqual(snap["ctx_window"], 1_000_000)
+        self.assertEqual(snap["band"], "NORMAL",
+                         "pre-fix this was 260k/200k = 130% and HANDOFF")
+
+    def test_stale_payload_still_supplies_window_size_but_not_tokens(self):
+        """Window size is a property of the account and does not expire. Token
+        counts from a session that stopped rendering are not current."""
+        p = self.write_transcript([assistant(usage(120_000))])
+        self._sl("aaaa0003", window=1_000_000, ctx=999_999, age_s=600)
+        snap = self._snap("aaaa0003", transcript=p)
+        self.assertEqual(snap["ctx_window"], 1_000_000)
+        self.assertEqual(snap["source"], "transcript")
+        self.assertEqual(snap["ctx_tokens"], 120_000)
+
+    def test_default_window_only_when_nothing_knows(self):
+        p = self.write_transcript([assistant(usage(5_000))])
+        snap = self._snap("aaaa0004", transcript=p)
+        self.assertEqual(snap["ctx_window"], ctxmon.DEFAULT_WINDOW)
+        self.assertEqual(snap["source"], "transcript")
+
+    def test_hud_still_wins_when_present(self):
+        hud = self.root / "hud"
+        (hud / "transcript-cache").mkdir(parents=True)
+        (hud / "context-cache").mkdir(parents=True)
+        tpath = str(self.root / "t.jsonl")
+        (hud / "transcript-cache" / "h.json").write_text(
+            json.dumps({"transcriptPath": tpath}), encoding="utf-8")
+        (hud / "context-cache" / "h.json").write_text(json.dumps(
+            {"context_window_size": 1_000_000,
+             "current_usage": {"cache_read_input_tokens": 300_000}}), encoding="utf-8")
+        self._sl("aaaa0005", window=1_000_000, ctx=111_111)
+        saved = ctxmon.HUD_DIR
+        ctxmon.HUD_DIR = hud
+        try:
+            snap = ctxmon.build_snapshot({"session_id": "aaaa0005xxxx",
+                                          "transcript_path": tpath, "cwd": ""})
+        finally:
+            ctxmon.HUD_DIR = saved
+        self.assertEqual(snap["source"], "hud")
+        self.assertEqual(snap["ctx_tokens"], 300_000)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

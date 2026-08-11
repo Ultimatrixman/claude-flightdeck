@@ -354,6 +354,11 @@ def _band(frac: float) -> tuple[str, str]:
 
 SL_MAX_AGE_S = 1800
 
+# How recently the statusline must have written for its TOKEN COUNTS to be
+# treated as current. The statusline ticks several times a second in a live
+# session, so anything older than this is a session that has stopped rendering.
+SL_LIVE_S = 120
+
 
 def _statusline_payload(sid8: str) -> dict:
     """Read the statusline capture, DROPPING quota that has gone stale.
@@ -373,6 +378,11 @@ def _statusline_payload(sid8: str) -> dict:
     d = _read_json(p) or {}
     if not d:
         return {}
+    d = dict(d)
+    try:
+        d["_age_s"] = time.time() - p.stat().st_mtime
+    except OSError:
+        d["_age_s"] = 1e9
     resets = ((d.get("rate_limits") or {}).get("five_hour") or {}).get("resets_at")
     fresh = isinstance(resets, (int, float)) and resets > time.time()
     if fresh:
@@ -381,7 +391,6 @@ def _statusline_payload(sid8: str) -> dict:
         except OSError:
             fresh = False
     if not fresh:
-        d = dict(d)
         d.pop("rate_limits", None)
         d["_quota_stale"] = True
     return d
@@ -407,28 +416,47 @@ def build_snapshot(hook: dict, phase: str | None = None) -> dict:
     prev = _read_json(SESSIONS_DIR / f"{sid8}.json") or {}
     scan = _scan_transcript(tpath, sid8)
 
+    sl = _statusline_payload(sid8)
+    quota_sample(sl)  # burn rate needs a series; nothing else keeps one
+
     hud = _hud_cache_for(tpath) or {}
     usage = hud.get("current_usage") or {}
     hud_ctx = ((usage.get("input_tokens") or 0)
                + (usage.get("cache_creation_input_tokens") or 0)
                + (usage.get("cache_read_input_tokens") or 0))
 
+    # The statusline payload carries the authoritative window size and usage.
+    # Reading it here is what makes claude-hud genuinely optional: without this
+    # a 1M-window user with no hud fell back to DEFAULT_WINDOW and was pushed
+    # into HANDOFF at what was really 26% used.
+    slcw = sl.get("context_window") or {}
+    slu = slcw.get("current_usage") or {}
+    sl_ctx = ((slu.get("input_tokens") or 0)
+              + (slu.get("cache_creation_input_tokens") or 0)
+              + (slu.get("cache_read_input_tokens") or 0))
+    sl_window = slcw.get("context_window_size") or 0
+
+    # Window SIZE does not expire the way usage does: it is a property of the
+    # account and model, so a stale payload still knows it. Token counts from
+    # the same payload are only trusted while it is being refreshed.
+    window = (hud.get("context_window_size") or sl_window
+              or prev.get("ctx_window") or DEFAULT_WINDOW)
+    sl_live = (sl.get("_age_s") or 1e9) < SL_LIVE_S
+
     if hud_ctx:
         ctx, source = hud_ctx, "hud"
-        window = hud.get("context_window_size") or DEFAULT_WINDOW
+    elif sl_ctx and sl_live:
+        ctx, source = sl_ctx, "statusline"
     elif scan.get("ctx"):
         ctx, source = scan["ctx"], "transcript"
-        window = prev.get("ctx_window") or DEFAULT_WINDOW
     else:
-        ctx, source, window = 0, "none", prev.get("ctx_window") or DEFAULT_WINDOW
+        ctx, source = 0, "none"
 
     usable = max(1, int(window * (1 - AUTOCOMPACT_BUFFER)))
     uncounted = _uncounted(tpath, scan.get("last_usage_off") or 0)
     frac = (ctx + uncounted) / usable
     band, advice = _band(frac)
 
-    sl = _statusline_payload(sid8)
-    quota_sample(sl)  # burn rate needs a series; nothing else keeps one
     rl = sl.get("rate_limits") or {}
     model = ((sl.get("model") or {}).get("display_name")
              or prev.get("model") or "")
