@@ -535,7 +535,11 @@ def build_snapshot(hook: dict, phase: str | None = None) -> dict:
     # the same payload are only trusted while it is being refreshed.
     window = (hud.get("context_window_size") or sl_window
               or prev.get("ctx_window") or DEFAULT_WINDOW)
-    sl_live = (sl.get("_age_s") or 1e9) < SL_LIVE_S
+    # Explicit None check, not `or`: an age of exactly 0.0 is falsy, so `or`
+    # turned the freshest possible payload into the oldest. It reproduced only
+    # where the write and the stat landed in the same clock tick.
+    _age = sl.get("_age_s")
+    sl_live = isinstance(_age, (int, float)) and _age < SL_LIVE_S
 
     if hud_ctx:
         ctx, source = hud_ctx, "hud"

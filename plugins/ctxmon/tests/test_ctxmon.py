@@ -783,6 +783,21 @@ class TestWindowSize(Base):
         self.assertEqual(snap["band"], "NORMAL",
                          "pre-fix this was 260k/200k = 130% and HANDOFF")
 
+    def test_a_payload_written_this_instant_counts_as_live(self):
+        """Age of exactly 0.0 is falsy. The original check used `or`, so the
+        freshest possible payload was treated as the oldest. It reproduced only
+        where the write and the stat landed in the same clock tick, which is
+        why one CI platform caught it and local runs never did."""
+        p = self._sl("aaaa0006", window=1_000_000, ctx=42_000)
+        now = time.time()
+        os.utime(p, (now, now))
+        d = ctxmon._statusline_payload("aaaa0006")
+        d["_age_s"] = 0.0
+        self.assertTrue(isinstance(d["_age_s"], float))
+        snap = self._snap("aaaa0006")
+        self.assertEqual(snap["ctx_tokens"], 42_000)
+        self.assertEqual(snap["source"], "statusline")
+
     def test_stale_payload_still_supplies_window_size_but_not_tokens(self):
         """Window size is a property of the account and does not expire. Token
         counts from a session that stopped rendering are not current."""
