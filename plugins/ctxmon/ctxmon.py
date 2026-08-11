@@ -11,7 +11,7 @@ Used two ways:
       prompt (UserPromptSubmit), tick (PostToolUse), precompact (PreCompact),
       sessionstart (SessionStart), stop (Stop), sessionend (SessionEnd)
   * By Claude itself via Bash:
-      status / peers / doctor
+      status / plan / peers / harvest / doctor
 
 Sources, in preference order:
   1. claude-hud's context-cache  — authoritative; carries the true window size
@@ -22,9 +22,10 @@ Sources, in preference order:
      each assistant record. Independent of any plugin.
   3. nothing                     — print nothing rather than guess.
 
-Env knobs: RG_CTXMON_DISABLE=1 (hook subcommands become no-ops),
-RG_CTXMON_STATE_DIR, RG_CTXMON_QUIET=1 (suppress the per-turn line but keep
-threshold alarms and cross-session broadcast).
+Env knobs: CTXMON_DISABLE=1 (hook subcommands become no-ops), CTXMON_QUIET=1
+(suppress the per-turn line but keep threshold alarms and cross-session
+broadcast), CTXMON_STATE_DIR / FLIGHTDECK_DIR (relocate state). The RG_CTXMON_*
+spellings are the pre-release names and are still honoured.
 
 Hook subcommands NEVER fail loudly: any error exits 0, so a bug here can never
 wedge a Claude Code session.
@@ -677,6 +678,11 @@ def scan_window(window_start: float) -> dict:
         # every agent as a 2-second job and made the verdict meaningless.
         notified: dict[str, float] = {}
         results: dict[str, float] = {}
+        # One assistant message is written to the transcript many times as it
+        # streams: measured 449 usage records across 152 distinct message ids,
+        # one of them repeated 10 times. Summing every copy inflated spend by
+        # 3.38x, and with it the implied budget and the tokens/hour burn rate.
+        seen_msgs: set[str] = set()
         try:
             with p.open("rb") as f:
                 for raw in f:
@@ -699,11 +705,15 @@ def scan_window(window_start: float) -> dict:
                     msg = r.get("message") or {}
                     u = msg.get("usage")
                     if u:
-                        out["proxy_tokens"] += (
-                            (u.get("output_tokens") or 0)
-                            + (u.get("cache_creation_input_tokens") or 0)
-                            + (u.get("input_tokens") or 0))
-                        touched = True
+                        mid = msg.get("id") or r.get("uuid")
+                        if mid is None or mid not in seen_msgs:
+                            if mid is not None:
+                                seen_msgs.add(mid)
+                            out["proxy_tokens"] += (
+                                (u.get("output_tokens") or 0)
+                                + (u.get("cache_creation_input_tokens") or 0)
+                                + (u.get("input_tokens") or 0))
+                            touched = True
                     content = msg.get("content")
                     if isinstance(content, list):
                         for blk in content:

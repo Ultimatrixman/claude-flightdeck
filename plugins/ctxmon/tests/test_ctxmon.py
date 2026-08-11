@@ -699,5 +699,42 @@ class TestStateLocation(Base):
             importlib.reload(ctxmon)
 
 
+class TestWindowSpend(Base):
+    """Regression: a streaming assistant message is written to the transcript
+    many times. Measured 449 usage records across 152 distinct message ids, one
+    repeated 10 times; summing every copy inflated spend by 3.38x."""
+
+    def _project(self, records):
+        proj = self.root / "projects" / "P"
+        proj.mkdir(parents=True, exist_ok=True)
+        with (proj / "s.jsonl").open("w", encoding="utf-8") as f:
+            for r in records:
+                f.write(json.dumps(r) + "\n")
+        ctxmon.PROJECTS_DIR = self.root / "projects"
+
+    def _rec(self, mid, out_tok):
+        return {"type": "assistant", "timestamp": "2026-08-10T12:00:00.000Z",
+                "message": {"id": mid, "content": [],
+                            "usage": {"output_tokens": out_tok,
+                                      "cache_creation_input_tokens": 0,
+                                      "input_tokens": 0}}}
+
+    def test_repeated_message_counted_once(self):
+        self._project([self._rec("msg_a", 100), self._rec("msg_a", 100),
+                       self._rec("msg_a", 100), self._rec("msg_b", 50)])
+        self.assertEqual(ctxmon.scan_window(0)["proxy_tokens"], 150)
+
+    def test_distinct_messages_all_counted(self):
+        self._project([self._rec(f"msg_{i}", 10) for i in range(7)])
+        self.assertEqual(ctxmon.scan_window(0)["proxy_tokens"], 70)
+
+    def test_records_without_a_message_id_fall_back_to_uuid(self):
+        a = self._rec(None, 30); a["message"].pop("id"); a["uuid"] = "u1"
+        b = self._rec(None, 30); b["message"].pop("id"); b["uuid"] = "u1"
+        c = self._rec(None, 40); c["message"].pop("id"); c["uuid"] = "u2"
+        self._project([a, b, c])
+        self.assertEqual(ctxmon.scan_window(0)["proxy_tokens"], 70)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
