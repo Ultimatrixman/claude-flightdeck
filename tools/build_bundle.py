@@ -66,7 +66,11 @@ def _merged_hooks() -> dict:
                     h["command"] = h["command"].replace(
                         "/bin/ctxmon", "/bin/ctxmon").replace("/bin/ipc", "/bin/ipc")
                 merged.setdefault(event, []).append(entry)
-    return {"_comment": BANNER, "hooks": merged}
+    # No extra top-level keys. A `_comment` banner here was the difference
+    # between "Installed" and "the plugin couldn't be loaded": the hook config
+    # is schema-validated and an unexpected sibling of `hooks` fails it. The
+    # generated-file warning lives in GENERATED.md instead.
+    return {"hooks": merged}
 
 
 def _manifest() -> dict:
@@ -75,19 +79,17 @@ def _manifest() -> dict:
         "description": (
             "Context and quota telemetry plus a cross-session message channel. "
             "Equivalent to installing ctxmon and ipc separately."),
-        "version": "0.1.0",
+        "version": "0.1.1",
         "author": {"name": "Ultimatrixman",
                    "url": "https://github.com/Ultimatrixman"},
         "homepage": "https://github.com/Ultimatrixman/claude-flightdeck",
         "repository": "https://github.com/Ultimatrixman/claude-flightdeck",
         "license": "MIT",
         "keywords": ["context", "quota", "ipc", "multi-session", "claude-code"],
-        "commands": [
-            "./commands/setup.md", "./commands/status.md", "./commands/plan.md",
-            "./commands/peers.md", "./commands/harvest.md",
-            "./commands/ping.md", "./commands/pong.md",
-        ],
-        "hooks": "./hooks/hooks.json",
+        # `commands` and `hooks` are deliberately absent. Both live at their
+        # auto-discovered default locations (commands/ and hooks/hooks.json),
+        # so declaring them adds a second place to keep in sync and nothing
+        # else. The official plugins ship no such fields either.
     }
 
 

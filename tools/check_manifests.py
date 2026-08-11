@@ -63,16 +63,30 @@ for entry in entries:
         if not (pdir / rel).is_file():
             err(f"{name}: commands entry {rel} does not exist")
 
-    hooks_rel = man.get("hooks")
-    if isinstance(hooks_rel, str):
-        hpath = pdir / hooks_rel
-        if not hpath.is_file():
-            err(f"{name}: hooks {hooks_rel} does not exist")
-        else:
-            cfg = load(hpath) or {}
-            hooks = cfg.get("hooks") or {}
-            if not hooks:
-                err(f"{name}: hooks file declares no events")
+    # Commands and hooks live at their auto-discovered locations. Validate what
+    # is on disk, not what a manifest claims, since the manifest no longer
+    # claims it.
+    cdir = pdir / "commands"
+    if cdir.is_dir() and not list(cdir.glob("*.md")):
+        err(f"{name}: commands/ exists but contains no .md files")
+
+    hpath = pdir / (man["hooks"] if isinstance(man.get("hooks"), str)
+                    else "hooks/hooks.json")
+    if not hpath.is_file():
+        if (pdir / "hooks").is_dir():
+            err(f"{name}: hooks/ exists but hooks.json does not")
+    else:
+        cfg = load(hpath) or {}
+        # A `_comment` banner alongside `hooks` was the difference between
+        # "Installed" and "the plugin couldn't be loaded". The hook config is
+        # schema-validated; an unexpected sibling key fails it silently.
+        extra = [k for k in cfg if k != "hooks"]
+        if extra:
+            err(f"{name}: hooks.json has non-schema top-level key(s): {extra}")
+        hooks = cfg.get("hooks") or {}
+        if not hooks:
+            err(f"{name}: hooks file declares no events")
+        if hooks:
             for event, groups in hooks.items():
                 for group in groups:
                     for h in group.get("hooks", []):
