@@ -1,7 +1,7 @@
 {
   "name": "ctxmon",
   "description": "Context and quota telemetry for Claude Code: per-turn budget status, threshold alarms, a scheduling planner for agent work, a cross-session view, and a provenance trail written before compaction.",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "author": {
     "name": "Ultimatrixman",
     "url": "https://github.com/Ultimatrixman"
