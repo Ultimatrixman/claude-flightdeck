@@ -76,7 +76,7 @@ def _manifest() -> dict:
         "description": (
             "Context and quota telemetry plus a cross-session message channel. "
             "Equivalent to installing ctxmon and ipc separately."),
-        "version": "0.1.2",
+        "version": "0.1.3",
         "author": {"name": "Ultimatrixman",
                    "url": "https://github.com/Ultimatrixman"},
         "homepage": "https://github.com/Ultimatrixman/claude-flightdeck",

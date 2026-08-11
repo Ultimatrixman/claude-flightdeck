@@ -201,9 +201,15 @@ Set `CTXMON_DISABLE=1` to turn every hook off.
 ```
 
 Sources are tried in order, each falling back to the next: claude-hud's cache if
-that plugin happens to be installed (it carries the true window size), then the
-session transcript in Claude Code's own format, then nothing. It prints nothing
-rather than guessing. claude-hud is optional and is not a dependency.
+that plugin happens to be installed, then the statusline payload this plugin
+captures itself, then the session transcript in Claude Code's own format, then
+nothing. It prints nothing rather than guessing.
+
+Window size comes from the statusline payload, which is what makes claude-hud
+genuinely optional rather than optional in name only. Size and usage age
+differently and are treated differently: window size is a property of your
+account and model, so even a stale payload still knows it, while token counts
+are trusted only while that session's statusline is actively rendering.
 
 State lives in `~/.claude/flightdeck/`, deliberately not in the plugin
 directory, because `${CLAUDE_PLUGIN_ROOT}` changes on every plugin update and
