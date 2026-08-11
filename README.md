@@ -135,6 +135,16 @@ command, and a plugin cannot ship a `statusLine`. Setup wraps whatever
 statusline you already have (including none) and passes the identical bytes
 straight through, so nothing about your display changes.
 
+**Upgrading from 0.1.6 or earlier:** update the plugin and run
+`/flightdeck:setup` again. Setup used to recognise only one of the paths its own
+wrapper can sit at, so on some upgrades it saved that wrapper as the statusline
+it was supposed to be wrapping. The wrapper then handed the payload to itself on
+every render. 0.1.7 recognises all of them, clears the bad record if one was
+already written, and moves `statusLine` onto a path that survives the next
+upgrade. If your statusline shows a plain built-in line afterwards, your
+original command was overwritten before 0.1.7 could protect it, and setting it
+once by hand is the only way back.
+
 <details>
 <summary>Standalone install, from a clone</summary>
 
@@ -266,15 +276,17 @@ library only.
 ## Development
 
 ```bash
-python3 plugins/ctxmon/tests/test_ctxmon.py   # 58 tests
+python3 plugins/ctxmon/tests/test_ctxmon.py   # unit suite
+bash tests/integration.sh                     # the shell layer
+bash tests/integration_setup.sh               # settings.json round trip
 python3 tools/build_bundle.py                 # regenerate the bundle plugin
 python3 tools/build_bundle.py --check         # fails if stale
 python3 tools/check_manifests.py
 ```
 
 `plugins/flightdeck/` is generated from the two components. Edit the component,
-then regenerate. CI enforces freshness across Windows, macOS and Linux on
-Python 3.9 and 3.13.
+then regenerate. CI runs all of the above across Windows, macOS and Linux on
+Python 3.9 and 3.13, plus shellcheck on the shipped shell files.
 
 ## License
 

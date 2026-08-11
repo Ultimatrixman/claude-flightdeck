@@ -32,6 +32,7 @@ if not entries:
     err("marketplace.json lists no plugins")
 
 seen_names = set()
+versions: dict[str, str] = {}
 for entry in entries:
     name, source = entry.get("name"), entry.get("source")
     if not name or not source:
@@ -58,6 +59,8 @@ for entry in entries:
     for field in ("description", "version", "license"):
         if not man.get(field):
             err(f"{name}: plugin.json missing {field}")
+    if man.get("version"):
+        versions[name] = man["version"]
 
     for rel in man.get("commands") or []:
         if not (pdir / rel).is_file():
@@ -102,6 +105,20 @@ for entry in entries:
                                 f"file {target}")
                         if not isinstance(h.get("timeout"), int):
                             err(f"{name}/{event}: hook has no integer timeout")
+
+# One release, one number. The version is written in four places: this
+# marketplace file, both component manifests, and the literal in
+# tools/build_bundle.py that regenerates the bundle's. Nothing else makes them
+# agree, and a bundle left on the old number installs as an older plugin than
+# the marketplace advertises.
+declared = (market.get("metadata") or {}).get("version")
+if not declared:
+    err("marketplace.json has no metadata.version")
+else:
+    for name, version in sorted(versions.items()):
+        if version != declared:
+            err(f"{name}: plugin.json version {version} does not match "
+                f"marketplace metadata.version {declared}")
 
 # Executable bits matter on POSIX; git preserves them, so check the source tree.
 for wrapper in ROOT.glob("plugins/*/bin/*"):

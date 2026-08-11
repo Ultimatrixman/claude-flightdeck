@@ -138,10 +138,33 @@ def wire_statusline(settings: dict, state_dir: Path, dry: bool) -> str:
     wrapper = (ROOT / "plugins" / "ctxmon" / "statusline.sh").as_posix()
     new_cmd = f'bash "{wrapper}"'
     current = (settings.get("statusLine") or {}).get("command", "")
-    if current.strip() == new_cmd:
-        return "statusline: already wired"
     inner_file = state_dir / "ctxmon" / "statusline-inner.sh"
+
+    # A record holding one of our own wrappers was written by a version that did
+    # not recognise its own command, and leaving it means the wrapper keeps
+    # handing the payload to a wrapper: unbounded recursion, both of them
+    # reading this same file. Repair it before anything else, including before
+    # the already-wired exit, or a rerun would never reach the repair.
+    healed = False
     if not dry:
+        try:
+            if is_ours_statusline(inner_file.read_text(encoding="utf-8")):
+                inner_file.unlink()
+                healed = True
+        except OSError:
+            pass
+    repaired = ("; discarded a recorded statusline that was one of our own "
+                "wrappers" if healed else "")
+
+    if current.strip() == new_cmd:
+        return f"statusline: already wired{repaired}"
+
+    # `ctxmon setup` wires a different path than this script does, so "already
+    # ours" is not "already wired". Recording our own command would either point
+    # a wrapper at a wrapper or, written empty, throw away the only copy of what
+    # the user had before.
+    ours = is_ours_statusline(current)
+    if not dry and not ours:
         inner_file.parent.mkdir(parents=True, exist_ok=True)
         # An EMPTY file means "there was no statusline", which the wrapper
         # treats differently from the file being absent (absent = fall back to
@@ -150,15 +173,31 @@ def wire_statusline(settings: dict, state_dir: Path, dry: bool) -> str:
         # newline="\n" is not cosmetic: this file's contents are handed to
         # `sh -c`, and a CRLF here would append a stray \r to the command.
         with open(inner_file, "w", encoding="utf-8", newline="\n") as fh:
-            fh.write("" if is_ours_statusline(current) else current)
+            fh.write(current)
     settings["statusLine"] = {"type": "command", "command": new_cmd}
+    if ours:
+        return (f"statusline: repointed here from another of our own paths; "
+                f"{inner_file} kept as it was{repaired}")
     return (f"statusline: wrapped (previous command saved to {inner_file})"
-            if current else
-            f"statusline: installed (no previous statusline; {inner_file} left empty)")
+            f"{repaired}" if current else
+            f"statusline: installed (no previous statusline; {inner_file} "
+            f"left empty){repaired}")
 
 
 def is_ours_statusline(cmd: str) -> bool:
-    return "plugins/ctxmon/statusline.sh" in (cmd or "")
+    """True if cmd already runs one of our wrappers, wherever it sits.
+
+    Wider than the path this script wires, because `ctxmon setup` installs the
+    wrapper to `~/.claude/flightdeck/statusline.sh` and 0.1.1's setup prose
+    pointed straight at a versioned plugin directory. Missing either of those
+    is what lets a wrapper be recorded as its own inner command.
+
+    Kept in step with `_is_ours` in plugins/ctxmon/ctxmon.py.
+    """
+    path = (cmd or "").replace("\\", "/")
+    if "statusline.sh" not in path:
+        return False
+    return any(f"/{d}/" in path for d in ("ctxmon", "flightdeck"))
 
 
 def main() -> int:
@@ -186,12 +225,19 @@ def main() -> int:
         if is_ours_statusline(cur):
             inner = state_dir / "ctxmon" / "statusline-inner.sh"
             prev = inner.read_text(encoding="utf-8").strip() if inner.is_file() else ""
+            # A record holding one of our own wrappers was written by a version
+            # that did not recognise its own command. Handing it back would
+            # point the wrapper at a wrapper reading this same file.
+            if is_ours_statusline(prev):
+                prev = ""
+                notes.append("statusline: the recorded command was ours, so it "
+                             "was not restored; set yours again by hand")
             if prev:
                 settings["statusLine"] = {"type": "command", "command": prev}
                 notes.append("statusline: restored your previous command")
             else:
                 settings.pop("statusLine", None)
-                notes.append("statusline: removed (there was none before)")
+                notes.append("statusline: removed")
         notes.append("uninstalled")
     else:
         components = args.only or list(COMPONENTS)

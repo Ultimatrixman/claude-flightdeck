@@ -1479,7 +1479,42 @@ def _settings_path() -> Path:
 
 
 def _is_ours(cmd: str) -> bool:
-    return "flightdeck/statusline.sh" in (cmd or "")
+    """True if cmd already runs one of our wrappers, wherever it sits.
+
+    Deliberately wider than the version-stable path installed below. 0.1.1
+    shipped setup as prose telling Claude to point statusLine at the plugin's
+    own copy, so an upgrading user's command is often
+    `<cache>/<marketplace>/{ctxmon,flightdeck}/<version>/statusline.sh`.
+    Reading one of those as "the statusline you had before" records a wrapper
+    as its own inner command, and the wrapper then hands the payload to a
+    wrapper that reads the same record: unbounded recursion, respawned on
+    every statusline tick, and the real previous command lost.
+
+    Kept in step with `is_ours_statusline` in install.py, which wires a
+    different path and so must recognise this one too.
+    """
+    path = (cmd or "").replace("\\", "/")
+    if "statusline.sh" not in path:
+        return False
+    return any(f"/{d}/" in path for d in ("ctxmon", "flightdeck"))
+
+
+def _recorded_inner(inner: Path) -> tuple[str, bool]:
+    """The statusline we recorded, and whether that record is unusable.
+
+    A record holding one of our own wrappers can only have been written by a
+    version that failed to recognise its own command: 0.1.6 and earlier tested
+    for one exact path, so a user who had followed 0.1.1's setup prose got the
+    wrapper itself recorded as "the statusline you had before". Handing that
+    back points the wrapper at a wrapper reading this same file, so it counts
+    as no record at all, and what the user really had is not recoverable from
+    it. Repairing settings.json alone would leave that file poisoned on disk.
+    """
+    try:
+        prev = inner.read_text(encoding="utf-8").strip()
+    except OSError:
+        return "", False
+    return ("", True) if _is_ours(prev) else (prev, False)
 
 
 def cmd_setup(args) -> int:
@@ -1517,21 +1552,41 @@ def cmd_setup(args) -> int:
         if not _is_ours(current):
             print("statusline is not ctxmon's; nothing to undo")
             return 0
-        prev = ""
-        try:
-            prev = inner.read_text(encoding="utf-8").strip()
-        except OSError:
-            pass
+        prev, unusable = _recorded_inner(inner)
         if prev:
             settings["statusLine"] = {"type": "command", "command": prev}
             note = "restored your previous statusline"
         else:
             settings.pop("statusLine", None)
-            note = "removed the statusLine entry (there was none before)"
+            note = ("removed the statusLine entry (the recorded one was ours, "
+                    "so restoring it would have looped; set yours again by hand)"
+                    if unusable else
+                    "removed the statusLine entry (there was none before)")
     else:
         if _is_ours(current):
-            # Refresh the copy: an upgraded plugin ships a newer wrapper.
-            note = "already installed; refreshed the wrapper from this version"
+            # Refresh the copy: an upgraded plugin ships a newer wrapper. The
+            # inner record is left alone; it holds the user's real previous
+            # statusline, and our own command must never replace it.
+            note = ("already installed; refreshed the wrapper from this version"
+                    if current.strip() == STATUSLINE_CMD else
+                    f"moved your statusLine off the versioned plugin path onto "
+                    f"{dst}, which survives upgrades")
+            # Repair a record an earlier version poisoned with our own command.
+            # Removing it is not the same as emptying it: absent returns the
+            # wrapper to detecting claude-hud, which is what such a user most
+            # likely had, while empty would pin the built-in minimal line.
+            if _recorded_inner(inner)[1]:
+                note += ("; discarded the recorded statusline, which was one "
+                         "of our own wrappers that an earlier setup wrote "
+                         "there and would have looped")
+                if not args.dry_run:
+                    try:
+                        inner.unlink()
+                    except OSError:
+                        pass
+            else:
+                note += ("; the statusline you had before this was left "
+                         "recorded as it was")
         else:
             # An EMPTY inner file means "there was no statusline", which is not
             # the same as the file being absent (absent means look for

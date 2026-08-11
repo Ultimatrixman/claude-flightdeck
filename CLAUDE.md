@@ -19,16 +19,18 @@ what is restated below.
 Everything is standard library only. Any Python 3.9+ works; there is no venv.
 
 ```bash
-python3 plugins/ctxmon/tests/test_ctxmon.py   # the suite (61 tests)
+python3 plugins/ctxmon/tests/test_ctxmon.py   # the unit suite
+bash tests/integration.sh                     # the shell layer
+bash tests/integration_setup.sh               # settings.json round trip
 python3 tools/build_bundle.py                 # regenerate plugins/flightdeck
 python3 tools/build_bundle.py --check         # freshness gate, exit 1 if stale
-python3 tools/check_manifests.py              # manifests agree with the tree
+python3 tools/check_manifests.py              # manifests agree with each other
 python3 install.py --dry-run                  # standalone installer, no writes
 ```
 
-CI runs all four on windows/macos/ubuntu against Python 3.9 and 3.13, plus
-shellcheck on the three shell files. Confirm a gate by its summary line, never
-by exit code alone.
+CI runs all of these on windows/macos/ubuntu against Python 3.9 and 3.13, plus
+shellcheck on the two bin wrappers and statusline.sh. Confirm a gate by its
+summary line, never by exit code alone.
 
 ## Layout
 
@@ -76,6 +78,27 @@ moments interleave; a real reset moves `resets_at` forward by hours.
 98.5% of a 1M window, across 504 readings with zero drops. `AUTOCOMPACT_BUFFER`
 is a reserve *we* choose. Never describe it in user-facing text as the point
 auto-compact triggers; the wording is "safe headroom".
+
+**Our own wrapper must never be recorded as the previous statusline.** Setup
+saves whatever statusLine it found so the wrapper can hand the payload on, so
+"is this already ours" has to recognise our wrapper *wherever it sits*, not
+just the one path the current version installs. Through 0.1.6 the test was the
+single substring `flightdeck/statusline.sh`, while 0.1.1 had shipped setup as
+prose that pointed statusLine at the plugin's own versioned copy and install.py
+wires `plugins/ctxmon/statusline.sh`. Upgrading from 0.1.1 therefore recorded a
+wrapper as the inner command, which makes the wrapper hand the payload to a
+wrapper reading the same record: unbounded recursion, respawned every tick, and
+the user's real statusline gone. `_is_ours` and `is_ours_statusline` now match
+`statusline.sh` under any `ctxmon` or `flightdeck` directory and must stay in
+step; `_recorded_inner` treats a record holding one of ours as no record, which
+is what also repairs the machines 0.1.6 already poisoned. Repairing
+settings.json alone would have left that file on disk.
+
+**One release, one version number.** It is written in four places: the
+marketplace metadata, both component manifests, and the literal in
+build_bundle.py that regenerates the bundle's. `check_manifests.py` asserts
+they agree, because a bundle left on the old number installs as an older
+plugin than the marketplace advertises.
 
 **State never lives in the plugin directory.** `${CLAUDE_PLUGIN_ROOT}` changes
 on every update and the old tree is cleaned up within weeks. State goes to
