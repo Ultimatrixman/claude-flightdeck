@@ -19,7 +19,8 @@ what is restated below.
 Everything is standard library only. Any Python 3.9+ works; there is no venv.
 
 ```bash
-python3 plugins/ctxmon/tests/test_ctxmon.py   # the unit suite
+python3 plugins/ctxmon/tests/test_ctxmon.py   # the ctxmon unit suite
+python3 plugins/ipc/tests/test_ipc.py         # the ipc claim matcher
 bash tests/integration.sh                     # the shell layer
 bash tests/integration_setup.sh               # settings.json round trip
 python3 tools/build_bundle.py                 # regenerate plugins/flightdeck
@@ -55,6 +56,38 @@ area.
 **Hooks must never fail loudly.** Every hook subcommand exits 0 on any error.
 A non-zero hook can interrupt a session, and no telemetry is worth that. The
 shell wrappers exit 0 even when no interpreter is found.
+
+**Exiting 0 is not enough; the payload is validated too.** The harness checks
+hook stdout against a per-event schema and prints the whole rejected object
+plus the expected schema into the transcript, which is a loud failure by any
+other name. Only some events accept
+`hookSpecificOutput.additionalContext`; `PreCompact` does not, and shipped
+through 0.1.7 emitting it, so every single compaction ended with a validation
+error under it. `_CONTEXT_EVENTS` is the whitelist and `_emit` degrades
+anything outside it to a top-level `systemMessage`, which is valid everywhere.
+There was never anything to inject at `PreCompact` anyway: the context that
+would carry it is the context being replaced. `cmd_sessionstart` hands the
+trail path back on the far side, where it survives.
+
+**Telemetry with no handling rule gets narrated.** The per-turn line was bare
+numbers, sent every turn, at every band. A model given a status readout that
+often treats it as salient and reports it: quoting its own context percentage
+back at the user, apologising for a budget it has not spent, trimming work
+nobody asked it to trim. Two things fix it and both are load-bearing. The line
+carries only quota, agents out, and a bare percentage until a band actually
+asks for something, because the figures a model has no use for are exactly the
+ones it fills space with. And `CTX_PROTOCOL` states the contract for the
+channel once per session: instrumentation, not content for the reply, and only
+`HARVEST` and `HANDOFF` ask for action. Once per session, not per turn, is the
+point; a suffix repeated every turn is the same mistake again.
+
+**`NORMAL` is not an event.** It is the band with no advice, so announcing a
+crossing into it is an alarm whose content is "nothing is wrong". It reached
+users at 4% context because `cmd_prompt` returned early before `_band_reset`
+whenever the source was not yet readable, which is the ordinary state of turn
+one, leaving no band on disk for `cmd_tick` to compare against. Seed the band
+before any early return, and gate the announcement on `advice` being non-empty
+rather than on a band index.
 
 **A subagent's `tool_result` is not its completion.** Agents run in the
 background, so `tool_result` returns in ~2s carrying only the agent id. Real
@@ -93,6 +126,24 @@ the user's real statusline gone. `_is_ours` and `is_ours_statusline` now match
 step; `_recorded_inner` treats a record holding one of ours as no record, which
 is what also repairs the machines 0.1.6 already poisoned. Repairing
 settings.json alone would have left that file on disk.
+
+**A claim pattern is relative to the cwd of the session that made it.** The
+edit guard used to take the pattern's literal prefix and ask whether that
+string appeared anywhere in the target path, with no cwd on either side. A
+session claiming `tests/**` in one repo therefore warned on every other repo's
+`tests/` on the machine, and `src` matched `mysrcfile.py` because a substring
+test knows nothing about path boundaries. The cwd is now snapshotted into the
+claim at claim time, a relative pattern that cannot be placed matches nothing
+at all, globs are matched with `fnmatch` and bare directories on path
+boundaries. A guard that cries wolf across repositories is one people learn to
+ignore, which is the same reasoning that already skips stale claims.
+
+`ipc.py` cannot import `relay.py`, because the relay runs as its own detached
+process and a hook must not pay for importing it, so the matcher is duplicated
+between the two behind `# --- claim matcher (keep identical) ---` markers.
+`test_claim_matcher_is_identical_in_both_modules` compares the two blocks
+textually. Drift means the relay reports an overlap the guard stays silent
+about, or the reverse.
 
 **One release, one version number.** It is written in four places: the
 marketplace metadata, both component manifests, and the literal in

@@ -167,10 +167,36 @@ def _sid8(session_id: str) -> str:
     return (session_id or "anon")[:8]
 
 
+# The harness validates hook stdout against a per-event schema, and only some
+# events accept hookSpecificOutput.additionalContext. PreCompact does not: it
+# fails with "Hook JSON output validation failed" printed into the user's
+# transcript under the compaction, which is exactly the loud failure hooks are
+# supposed to never produce. There is nothing to inject there anyway, because
+# the context that would carry it is the context being replaced. SessionStart
+# is absent from the schema the harness prints but demonstrably accepts
+# additionalContext, so it is listed on observed behaviour rather than on that
+# listing.
+_CONTEXT_EVENTS = frozenset((
+    "UserPromptSubmit", "PostToolUse", "PostToolBatch",
+    "SessionStart", "Stop", "SubagentStop",
+))
+
+
 def _emit(event: str, text: str) -> None:
-    """Inject text into the model's context via hook stdout."""
+    """Inject text into the model's context via hook stdout. An event that
+    cannot carry context degrades to a user-visible message rather than
+    emitting a payload the harness will reject."""
+    if event not in _CONTEXT_EVENTS:
+        _emit_user(text)
+        return
     print(json.dumps({"hookSpecificOutput": {
         "hookEventName": event, "additionalContext": text}}))
+
+
+def _emit_user(text: str) -> None:
+    """Show text to the user. `systemMessage` is a top-level field valid on
+    every hook event, which additionalContext is not."""
+    print(json.dumps({"systemMessage": text}))
 
 
 def _ago(sec) -> str:
@@ -413,8 +439,13 @@ def _scan_transcript(path: str, sid8: str) -> dict:
     st["seen_agents"] = sorted(a for a in seen_agents if a)
     st["agents_total"] = len(st["seen_agents"])
     # Bounded: only ids still plausibly in flight need their start time kept.
+    # An id still OPEN is kept whatever its age. The age test is against the
+    # wall clock, so a session left running overnight with a background agent
+    # out lost that agent's start, and a run whose start is gone is not
+    # measured late, it is never measured at all.
     cutoff = time.time() - 86400
-    st["agent_starts"] = {k: v for k, v in agent_starts.items() if v >= cutoff}
+    st["agent_starts"] = {k: v for k, v in agent_starts.items()
+                          if v >= cutoff or k in open_agents}
     out = dict(st)
     out["path"] = path
     _atomic_write(_scan_state_path(sid8), out)
@@ -602,6 +633,7 @@ def save_snapshot(snap: dict) -> None:
 
 
 def _quota_str(snap: dict) -> str:
+    """Bare, with no leading separator: callers place it differently."""
     bits = []
     for label, key in (("5h", "rate_5h_pct"), ("7d", "rate_7d_pct")):
         v = snap.get(key)
@@ -609,7 +641,7 @@ def _quota_str(snap: dict) -> str:
             bits.append(f"{label} {int(v)}%")
     if not bits:
         return ""
-    s = " · quota " + "/".join(bits)
+    s = "quota " + "/".join(bits)
     reset = snap.get("rate_5h_resets_at")
     if isinstance(reset, (int, float)):
         left = reset - time.time()
@@ -618,18 +650,36 @@ def _quota_str(snap: dict) -> str:
     return s
 
 
+def _agent_str(snap: dict) -> str:
+    n = snap.get("agents_running") or 0
+    return f"{n} agent{'s' if n != 1 else ''} running" if n else ""
+
+
 def status_line(snap: dict) -> str:
-    """The one-line form injected each turn. Kept deliberately short."""
+    """The one-line form injected each turn.
+
+    Below CONSERVE there is no decision to make, so the line carries only what
+    still governs one: quota, which decides whether dispatched work can finish
+    before the window closes, and the agents already out against it. Context
+    trails as a bare percentage.
+
+    A full budget readout every turn taught the model to narrate its own
+    context back to the user and to trim work nobody asked it to trim. The
+    numbers it has no use for are precisely the ones it reports, so in the band
+    that asks for nothing they are not sent."""
     ctx, win = snap["ctx_tokens"], snap["ctx_window"]
+    quota, agents = _quota_str(snap), _agent_str(snap)
+    if not snap.get("advice"):
+        bits = [b for b in (quota, agents, f"ctx {int(snap['ctx_pct'])}%") if b]
+        return "[ctx] " + " · ".join(bits)
+
     unc = snap.get("uncounted_est") or 0
     unc_s = f" (+≤{_k(unc)} uncounted)" if unc >= 1500 else ""
-    agents = snap.get("agents_running") or 0
-    agent_s = f" · {agents} agent{'s' if agents != 1 else ''} running" if agents else ""
-    advice = f": {snap['advice']}" if snap.get("advice") else ""
-    return (f"[ctx] {_k(ctx)}/{_k(win)} ({snap['ctx_pct']}%){unc_s} · "
-            f"{_k(snap['headroom_tokens'])} safe headroom · "
-            f"out {_k(snap['out_total'])}{agent_s}{_quota_str(snap)} · "
-            f"{snap['band']}{advice}")
+    return "[ctx] " + " · ".join(b for b in (
+        f"{_k(ctx)}/{_k(win)} ({snap['ctx_pct']}%){unc_s}",
+        f"{_k(snap['headroom_tokens'])} safe headroom",
+        f"out {_k(snap['out_total'])}", agents, quota,
+        f"{snap['band']}: {snap['advice']}") if b)
 
 
 # ------------------------------------------------------------- quota & plan
@@ -1002,9 +1052,14 @@ def cmd_prompt(_args) -> int:
     hook = _hook_input()
     snap = build_snapshot(hook, phase="busy")
     save_snapshot(snap)
+    # Seed the band BEFORE any early return. Behind the return, a session whose
+    # first prompt had no readable source left no band on disk, so the first
+    # PostToolUse read seen=-1 and announced a crossing into the band the
+    # session had been in all along. That is how "crossed into NORMAL" reached
+    # users at 4% context.
+    _band_reset(snap)
     if _env_flag("CTXMON_QUIET", "RG_CTXMON_QUIET") or snap["source"] == "none":
         return 0
-    _band_reset(snap)
     _emit("UserPromptSubmit", status_line(snap))
     return 0
 
@@ -1050,7 +1105,11 @@ def cmd_tick(_args) -> int:
             _band_path(sid8).write_text(snap["band"], encoding="utf-8")
         except OSError:
             pass
-        msgs.append(f"[ctx] crossed into {snap['band']}: {status_line(snap)}")
+        # Record the crossing, but only speak for a band that asks for
+        # something. NORMAL is the band with no advice, so announcing it is an
+        # alarm whose content is "nothing is wrong".
+        if snap.get("advice"):
+            msgs.append(f"[ctx] crossed into {snap['band']}: {status_line(snap)}")
 
     prev_unc = snap.get("uncounted_est") or 0
     if prev_unc >= BIG_RESULT_TOKENS and now_i <= seen_i:
@@ -1301,10 +1360,13 @@ def cmd_precompact(_args) -> int:
         "trail": str(trail_path) if trail else "",
     }
     _atomic_write(STATE_DIR / f"compact-{snap['sid8']}.json", ck)
-    _emit("PreCompact",
-          "[ctx] Compaction starting. The provenance trail (files read, "
-          "commands run, agents dispatched) has been written to "
-          f"{trail_path if trail else 'nowhere: the scan failed'}.")
+    # To the user, not into context: PreCompact cannot carry additionalContext,
+    # and the context that would hold it is the context being replaced. The
+    # model gets this pointer back from cmd_sessionstart on the other side.
+    _emit_user(
+        "[ctx] Compaction starting. The provenance trail (files read, "
+        "commands run, agents dispatched) has been written to "
+        f"{trail_path if trail else 'nowhere: the scan failed'}.")
     return 0
 
 
@@ -1336,30 +1398,52 @@ def cmd_harvest(args) -> int:
     return 0
 
 
+# Sent once per session, and again on the far side of a compaction, because
+# SessionStart fires with source=compact.
+#
+# The per-turn line used to arrive as bare numbers with no instruction for
+# handling them. A model handed a status readout every turn treats it as
+# salient and narrates it: reporting its own percentage back, apologising for
+# context it has not run out of, cutting work short to save a budget nobody
+# asked it to save. The contract for the whole channel belongs here, once,
+# rather than as a suffix paid on every turn.
+CTX_PROTOCOL = (
+    "[ctx] flightdeck reports this session's quota and token budget to you on "
+    "each turn. It is instrumentation for your own planning, never content for "
+    "your reply: do not repeat the figures back, do not remark on your context "
+    "or quota unless you are asked about them, and do not shorten, hedge or "
+    "abandon work on account of them. Only two bands ask for anything. HARVEST "
+    "means write down what this session has learned, into memory, tasks or "
+    "docs, while the detail is still here; compaction keeps conclusions and "
+    "drops the provenance behind them. HANDOFF means start nothing new and "
+    "finish the handoff. Act when you see those two. Ignore the rest."
+)
+
+
 def cmd_sessionstart(_args) -> int:
-    """SessionStart: after a compact or resume, hand back the pointer to the
-    pre-compaction checkpoint. Silent on a genuinely fresh start."""
+    """SessionStart: state the contract for the [ctx] channel, and after a
+    compact or resume hand back the pointer to the pre-compaction checkpoint."""
     hook = _hook_input()
     snap = build_snapshot(hook, phase="busy")
     save_snapshot(snap)
+    parts = [CTX_PROTOCOL]
+
     src = (hook.get("source") or "").lower()
-    if src not in ("compact", "resume"):
-        return 0
-    ckpath = STATE_DIR / f"compact-{snap['sid8']}.json"
-    ck = _read_json(ckpath)
-    if not ck:
-        return 0
-    trail = ck.get("trail") or ""
-    trail_note = (f" The provenance trail for everything before the summary "
-                  f"(files read, commands run, agents dispatched) is at {trail}. "
-                  f"Read it before concluding a detail was lost."
-                  if trail else "")
-    _emit("SessionStart",
-          f"[ctx] Session {src}d. Before compaction: "
-          f"{_k(ck.get('ctx_tokens_before'))} tokens over "
-          f"{ck.get('turns_before')} turns, "
-          f"{_ago(time.time() - (ck.get('at') or time.time()))} ago."
-          f"{trail_note}")
+    ck = (_read_json(STATE_DIR / f"compact-{snap['sid8']}.json")
+          if src in ("compact", "resume") else None)
+    if ck:
+        trail = ck.get("trail") or ""
+        trail_note = (f" The provenance trail for everything before the summary "
+                      f"(files read, commands run, agents dispatched) is at "
+                      f"{trail}. Read it before concluding a detail was lost."
+                      if trail else "")
+        parts.append(
+            f"[ctx] Session {src}d. Before compaction: "
+            f"{_k(ck.get('ctx_tokens_before'))} tokens over "
+            f"{ck.get('turns_before')} turns, "
+            f"{_ago(time.time() - (ck.get('at') or time.time()))} ago."
+            f"{trail_note}")
+    _emit("SessionStart", "\n".join(parts))
     return 0
 
 

@@ -23,6 +23,9 @@ jobs:
       - name: ctxmon suite
         run: python plugins/ctxmon/tests/test_ctxmon.py
 
+      - name: ipc suite
+        run: python plugins/ipc/tests/test_ipc.py
+
       # The Python suite covers logic. This covers the shell layer between
       # Claude Code and Python, which is where platform differences live and
       # which no amount of unit testing on one OS can validate. `shell: bash`

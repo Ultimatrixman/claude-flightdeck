@@ -121,10 +121,27 @@ case "$sl_out" in
 esac
 
 echo "== window size is taken from the captured payload, with no claude-hud =="
+# Asserted against the snapshot, not the per-turn line: below CONSERVE that
+# line no longer spells the window out, and the invariant being guarded is that
+# a 1M user is not measured against DEFAULT_WINDOW and shoved into HANDOFF at
+# what is really 18% used.
+printf '%s' "$HOOK_JSON" | "$CTXMON" prompt >/dev/null 2>&1
+out=$("$CTXMON" status --json 2>/dev/null)
+case "$out" in
+  *'"ctx_window": 1000000'*) ok "1M window read from the statusline payload" ;;
+  *) bad "window not read from payload (P0 regression): $out" ;;
+esac
+case "$out" in
+  *'"band": "NORMAL"'*) ok "1M session at 18% stays in NORMAL" ;;
+  *) bad "band wrong for a 1M window at 18%: $out" ;;
+esac
+
+echo "== the per-turn line stays quiet below CONSERVE =="
 out=$(printf '%s' "$HOOK_JSON" | "$CTXMON" prompt 2>/dev/null)
 case "$out" in
-  *"1.00M"*) ok "1M window read from the statusline payload" ;;
-  *) bad "window not read from payload (P0 regression): $out" ;;
+  *"safe headroom"*) bad "full readout leaked into a band that asks nothing: $out" ;;
+  *"quota 5h 40%"*) ok "quota leads the quiet line" ;;
+  *) bad "quiet line missing quota: $out" ;;
 esac
 
 echo

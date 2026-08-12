@@ -11,11 +11,22 @@ finish before your quota window closes.
 This puts that information where decisions actually get made.
 
 ```
-[ctx] 322k/1.00M (32.2%) · 513k safe headroom · out 157k · quota 5h 18%/7d 28% (resets 4h) · NORMAL
+[ctx] quota 5h 18%/7d 28% (resets 4h) · ctx 32%
 ```
 
-That line arrives at the start of every turn, costs about 40 tokens, and is
-read by Claude, not printed for you.
+That line arrives at the start of every turn, costs about 20 tokens, and is
+read by Claude, not printed for you. It stays that short while there is nothing
+to decide. Once the session crosses into a band that asks for something, it
+opens up into the full readout and carries the directive with it:
+
+```
+[ctx] 620k/1.00M (62%) · 215k safe headroom · out 157k · quota 5h 41%/7d 28% (resets 2h) · CONSERVE: delegate file-heavy search to subagents; background long runs
+```
+
+The split is deliberate. Quota is the figure that decides whether work already
+dispatched can finish before the window closes, so it leads. Context is the
+figure a model will happily narrate back at you all day if you let it, so below
+CONSERVE it is one number and nothing else.
 
 ## What already exists
 
@@ -46,8 +57,15 @@ make on its own, because it can see the number.
 **A silent alarm on the path that actually burns context.** A single turn can
 spend six figures of tokens between two of your messages, and a per-turn
 readout is blind to exactly that. The `PostToolUse` hook prints nothing at
-steady state, so it costs zero tokens, and speaks only when a threshold is newly
-crossed or one tool result was unusually large.
+steady state, so it costs zero tokens, and speaks only when a threshold that
+asks for something is newly crossed, or one tool result was unusually large.
+
+**Numbers Claude will not read back to you.** Telemetry sent to a model without
+a rule for handling it gets treated as something to report. Every session opens
+with the contract for the channel: the figures are for its own planning, not
+for your reply, and only `HARVEST` and `HANDOFF` ask it to act. The point is
+notes taken before compaction drops them, not a running commentary on token
+spend.
 
 **A scheduling verdict, not a dashboard.** This is the part with no equivalent
 anywhere:
@@ -107,7 +125,9 @@ The `ipc` plugin here is worth installing when you want:
 - **Windows**, where the native feature is unavailable.
 - **Advisory work claims.** A session declares what it is working on and over
   which paths. When another session is about to edit a file inside that claim, a
-  `PreToolUse` guard warns it first. Claims go stale on their own, because a
+  `PreToolUse` guard warns it first. Patterns are anchored to the directory the
+  claiming session was working in, so `tests/**` claimed in one repo says
+  nothing about another repo's `tests/`. Claims go stale on their own, because a
   claim that warns forever trains everyone to ignore the guard.
 - **Phase and claims shown together** in `peers`, so "who is busy" and
   "who owns this file" are one answer instead of two.
@@ -181,10 +201,13 @@ The four bands are fractions of usable budget, so they mean the same thing on a
 
 | Band | Directive given to Claude |
 |---|---|
-| `NORMAL` | work directly |
+| `NORMAL` | nothing; the line shrinks and the mid-turn alarm stays quiet |
 | `CONSERVE` | delegate file-heavy search to subagents, background long runs |
 | `HARVEST` | write down what the session learned: memory, tasks, docs |
 | `HANDOFF` | stop starting new work, finish the harvest |
+
+`NORMAL` is not a directive, so it is never announced. Only the three bands
+that ask for something ever interrupt a turn.
 
 ## Privacy, before you enable trails
 

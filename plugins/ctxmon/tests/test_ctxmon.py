@@ -63,6 +63,15 @@ def usage(ctx, out=0):
             "cache_read_input_tokens": 0, "output_tokens": out}
 
 
+def iso_ago(seconds: float) -> str:
+    """A fixture timestamp relative to now, for anything that crosses the
+    24h agent_starts prune. Hardcoded calendar dates made the incremental-scan
+    test pass only within a day of the date it was written, because the prune
+    is measured against the wall clock and the fixture is not."""
+    return time.strftime("%Y-%m-%dT%H:%M:%S.000Z",
+                         time.gmtime(time.time() - seconds))
+
+
 class TestBands(Base):
     def test_boundaries_map_to_expected_names(self):
         self.assertEqual(ctxmon._band(0.0)[0], "NORMAL")
@@ -433,14 +442,41 @@ class TestSnapshot(Base):
                          int(window * (1 - ctxmon.AUTOCOMPACT_BUFFER)))
         self.assertLess(snap["usable_tokens"], window)
 
-    def test_status_line_is_compact(self):
+    def _snap(self, band="NORMAL", advice="", **kw):
         snap = {"ctx_tokens": 181000, "ctx_window": 1000000, "ctx_pct": 18.1,
-                "headroom_tokens": 653000, "out_total": 58000, "band": "NORMAL",
-                "advice": "", "uncounted_est": 0, "agents_running": 0}
-        line = ctxmon.status_line(snap)
+                "headroom_tokens": 653000, "out_total": 58000, "band": band,
+                "advice": advice, "uncounted_est": 0, "agents_running": 0,
+                "rate_5h_pct": 12, "rate_7d_pct": 30}
+        snap.update(kw)
+        return snap
+
+    def test_status_line_is_compact(self):
+        line = ctxmon.status_line(self._snap(band="CONSERVE", advice="delegate"))
         self.assertLess(len(line), 200, "the per-turn line is paid every turn")
         self.assertIn("181k", line)
-        self.assertIn("NORMAL", line)
+        self.assertIn("CONSERVE", line)
+
+    def test_quiet_band_leads_with_quota_and_demotes_context(self):
+        """Below CONSERVE nothing is being asked of the model, and a full
+        budget readout every turn is what taught it to narrate its own context
+        back to the user. Only quota, agents out against it, and a bare
+        percentage survive."""
+        line = ctxmon.status_line(self._snap())
+        self.assertLess(line.index("quota"), line.index("ctx 18%"),
+                        "quota is the figure that governs a decision here")
+        for gone in ("safe headroom", "out 58k", "NORMAL", "181k", "1.00M"):
+            self.assertNotIn(gone, line, f"{gone!r} has no use below CONSERVE")
+
+    def test_quiet_band_keeps_agents_running(self):
+        line = ctxmon.status_line(self._snap(agents_running=3))
+        self.assertIn("3 agents running", line)
+
+    def test_actionable_band_keeps_the_full_readout(self):
+        line = ctxmon.status_line(self._snap(
+            band="HARVEST", advice="write down what this session LEARNED"))
+        for kept in ("181k/1.00M", "safe headroom", "out 58k", "quota",
+                     "HARVEST: write down"):
+            self.assertIn(kept, line)
 
 
 class TestAgentDuration(Base):
@@ -596,6 +632,77 @@ class TestHooksFailOpen(Base):
         r = self._run("tick", payload)
         self.assertEqual(r.stdout.strip(), "",
                          "a subagent's context is not the main session's budget")
+
+    def _tick_at(self, ctx_tokens):
+        p = self.write_transcript([assistant(usage(ctx_tokens, out=100))])
+        return self._run("tick", json.dumps(
+            {"session_id": "zz", "cwd": "C:/x", "transcript_path": p})).stdout
+
+    def test_tick_never_announces_a_crossing_into_normal(self):
+        """Regression: with no band on disk the mid-turn alarm read seen=-1,
+        so the first tool call of a session announced 'crossed into NORMAL' at
+        4% context. NORMAL is the band that asks for nothing; an alarm saying
+        nothing is wrong is the whole of what users saw."""
+        self.assertEqual(self._tick_at(10_000).strip(), "")
+
+    def test_tick_still_announces_a_band_that_asks_for_something(self):
+        out = self._tick_at(130_000)
+        self.assertIn("HARVEST", out, "silencing NORMAL must not silence the "
+                                      "bands the alarm exists for")
+
+    def test_prompt_seeds_the_band_even_when_it_stays_silent(self):
+        """The silent path is exactly the one that left no band behind, which
+        is what let the phantom crossing through."""
+        self._run("prompt", json.dumps({"session_id": "zz", "cwd": "C:/x",
+                                        "transcript_path": "C:/nope.jsonl"}))
+        band = self.root / "sub-state" / "band-zz.txt"
+        self.assertTrue(band.exists(), "a silent turn still records its band")
+        self.assertEqual(band.read_text(encoding="utf-8").strip(), "NORMAL")
+
+    def test_every_hook_emits_output_the_harness_accepts(self):
+        """Regression: PreCompact printed hookSpecificOutput.additionalContext,
+        which the harness rejects, so every compaction ended with 'Hook JSON
+        output validation failed' under it. A hook is not allowed to fail
+        loudly, and printing a payload for the wrong event is one way to."""
+        payload = json.dumps({"session_id": "zz", "cwd": "C:/x",
+                              "transcript_path": "C:/nope/missing.jsonl",
+                              "source": "startup", "trigger": "manual"})
+        for cmd in ("prompt", "tick", "stop", "precompact", "sessionstart",
+                    "sessionend"):
+            r = self._run(cmd, payload)
+            self.assertEqual(r.returncode, 0, f"{cmd}: {r.stderr}")
+            for line in r.stdout.splitlines():
+                if not line.strip():
+                    continue
+                obj = json.loads(line)  # must be JSON at all
+                hso = obj.get("hookSpecificOutput")
+                if hso is None:
+                    continue
+                self.assertIn(hso.get("hookEventName"), ctxmon._CONTEXT_EVENTS,
+                              f"{cmd} emitted additionalContext for an event "
+                              f"that cannot carry it")
+
+    def test_precompact_reports_the_trail_without_injecting_context(self):
+        payload = json.dumps({"session_id": "zz", "cwd": "C:/x",
+                              "transcript_path": "C:/nope/missing.jsonl",
+                              "trigger": "manual"})
+        out = self._run("precompact", payload).stdout.strip()
+        self.assertTrue(out, "the user is still told where the trail went")
+        obj = json.loads(out)
+        self.assertNotIn("hookSpecificOutput", obj)
+        self.assertIn("Compaction starting", obj.get("systemMessage", ""))
+
+    def test_sessionstart_states_the_contract_for_the_ctx_channel(self):
+        """Numbers with no handling instruction get narrated. The contract is
+        sent once per session rather than as a suffix paid every turn."""
+        payload = json.dumps({"session_id": "zz", "cwd": "C:/x",
+                              "transcript_path": "C:/nope/missing.jsonl",
+                              "source": "startup"})
+        obj = json.loads(self._run("sessionstart", payload).stdout.strip())
+        text = obj["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("HARVEST", text)
+        self.assertIn("HANDOFF", text)
+        self.assertIn("never content for your reply", text)
 
 
 
@@ -889,16 +996,31 @@ class TestAgentDurationLog(Base):
         """The start timestamp must survive between scans, or a run spanning
         two hook invocations is never measured at all."""
         p = self.write_transcript([
-            assistant(content=self._blk("i1"), ts="2026-08-10T12:00:00.000Z"),
+            assistant(content=self._blk("i1"), ts=iso_ago(1800)),
         ])
         ctxmon._scan_transcript(p, "agt5")
         self.assertEqual(ctxmon.agent_history(), [])
         with open(p, "a", encoding="utf-8") as f:
-            f.write(json.dumps(self._notify("i1", "2026-08-10T12:30:00.000Z")) + "\n")
+            f.write(json.dumps(self._notify("i1", iso_ago(0))) + "\n")
         ctxmon._scan_transcript(p, "agt5")
         hist = ctxmon.agent_history()
         self.assertEqual(len(hist), 1)
         self.assertAlmostEqual(hist[0]["s"], 1800.0, places=1)
+
+    def test_a_still_open_agent_keeps_its_start_however_old(self):
+        """The prune is against the wall clock; the start it prunes is a
+        transcript timestamp. A session left open overnight with a background
+        agent still out lost the start, and with it the whole measurement."""
+        p = self.write_transcript([
+            assistant(content=self._blk("i2"), ts=iso_ago(3 * 86400)),
+        ])
+        st = ctxmon._scan_transcript(p, "agt6")
+        self.assertEqual(st["open_agents"], ["i2"])
+        self.assertIn("i2", st["agent_starts"])
+        with open(p, "a", encoding="utf-8") as f:
+            f.write(json.dumps(self._notify("i2", iso_ago(2 * 86400))) + "\n")
+        ctxmon._scan_transcript(p, "agt6")
+        self.assertAlmostEqual(ctxmon.agent_history()[0]["s"], 86400.0, places=1)
 
     def test_entries_older_than_the_window_are_excluded(self):
         ctxmon.record_agent_duration("old", time.time() - 40 * 86400, 600.0)

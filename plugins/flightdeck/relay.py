@@ -23,6 +23,7 @@ matching X-RG-Token header (use this when binding beyond localhost).
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import json
 import os
 import re
@@ -113,21 +114,76 @@ def _host_name():
     return None
 
 
+# Claim-pattern matching. DUPLICATED VERBATIM in ipc.py, which cannot import
+# this module: the relay runs as its own detached process and the hooks must
+# not pay for importing it. test_claim_matcher_is_identical_in_both_modules
+# asserts the two copies stay in step, the same way _is_ours and
+# is_ours_statusline are kept in step in ctxmon.
+# --- claim matcher (keep identical) ---
+_ABS_PAT = re.compile(r"^(?:/|[a-z]:/)")
+
+
+def _norm_path(p: str) -> str:
+    return (p or "").replace("\\", "/").rstrip("/").lower()
+
+
 def _pat_prefix(pat: str) -> str:
     """Literal prefix of an fnmatch pattern, normalized for comparison."""
     return pat.replace("\\", "/").lower().split("*")[0].split("?")[0].rstrip("/")
 
 
-def _claims_overlap(paths_a, paths_b) -> list:
-    """Directory-prefix overlap between two claim pattern lists."""
+def _under(a: str, b: str) -> bool:
+    """Is `a` at or beneath `b`, on path boundaries. A bare startswith made
+    'src/tests' a child of 'src/test'."""
+    return bool(a) and bool(b) and (a == b or a.startswith(b + "/"))
+
+
+def _claim_glob(pat: str, base: str) -> str:
+    """One claim pattern as an absolute, normalized glob, or '' when it cannot
+    be placed on the filesystem at all.
+
+    A relative pattern means nothing without the cwd of the session that made
+    it, and matching one anyway is how a claim of 'tests/**' held by a session
+    in one repo warned on every OTHER repo's tests/ too. An unplaceable
+    pattern matches nothing: a guard that cries wolf across repositories is
+    one people learn to ignore, which costs more than the warning is worth."""
+    p = _norm_path(pat)
+    if not p:
+        return ""
+    if _ABS_PAT.match(p):
+        return p
+    while p.startswith("./"):
+        p = p[2:]
+    base = _norm_path(base)
+    return f"{base}/{p}" if base and p else ""
+
+
+def _claim_covers(fp: str, pat: str, base: str) -> bool:
+    """Does one claim pattern, made from `base`, cover one file path?"""
+    g = _claim_glob(pat, base)
+    if not g:
+        return False
+    f = _norm_path(fp)
+    if any(ch in g for ch in "*?["):
+        return fnmatch.fnmatch(f, g)
+    # No glob characters: the pattern names a file or a whole directory.
+    return _under(f, g)
+
+
+def _claims_overlap(paths_a, base_a, paths_b, base_b) -> list:
+    """Directory overlap between two claims, each pattern first resolved
+    against the cwd of the session that made it."""
     hits = []
     for a in paths_a or []:
-        pa = _pat_prefix(a)
+        pa = _pat_prefix(_claim_glob(a, base_a))
+        if not pa:
+            continue
         for b in paths_b or []:
-            pb = _pat_prefix(b)
-            if pa and pb and (pa.startswith(pb) or pb.startswith(pa)):
+            pb = _pat_prefix(_claim_glob(b, base_b))
+            if pb and (_under(pa, pb) or _under(pb, pa)):
                 hits.append(f"{a} ~ {b}")
     return hits
+# --- end claim matcher ---
 
 
 def _claim_view(peer: dict, now: float):
@@ -318,12 +374,19 @@ def _claim(body):
             return 200, {"ok": True, "claim": None, "overlaps": []}
         desc = str(body.get("desc", ""))[:200]
         paths = [str(x)[:300] for x in (body.get("paths") or [])][:40]
-        p["claim"] = {"desc": desc, "paths": paths, "ts": time.time()}
+        # The cwd is snapshotted INTO the claim, not read from the peer later:
+        # a relative pattern is anchored to where the session stood when it
+        # claimed, and a re-register from elsewhere must not silently move it.
+        base = str(body.get("cwd") or p.get("cwd") or "")
+        p["claim"] = {"desc": desc, "paths": paths, "cwd": base,
+                      "ts": time.time()}
         overlaps = []
         for q in _peers.values():
             if q["name"] == name or not q.get("claim"):
                 continue
-            hits = _claims_overlap(paths, q["claim"].get("paths"))
+            qc = q["claim"]
+            hits = _claims_overlap(paths, base, qc.get("paths"),
+                                   qc.get("cwd") or q.get("cwd") or "")
             if hits:
                 overlaps.append({"name": q["name"], "desc": q["claim"].get("desc", ""),
                                  "hits": hits})

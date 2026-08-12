@@ -22,6 +22,7 @@ never wedge a Claude Code session.
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import json
 import os
 import re
@@ -183,6 +184,78 @@ def _whoami_path(sid: str) -> Path:
     return STATE_DIR / f"whoami-{(sid or 'anon')[:12]}.txt"
 
 
+# Claim-pattern matching. DUPLICATED VERBATIM from relay.py, which this cannot
+# import: the relay runs as its own detached process and a hook must not pay
+# for importing it. test_claim_matcher_is_identical_in_both_modules asserts the
+# two copies stay in step, the same way _is_ours and is_ours_statusline are
+# kept in step in ctxmon.
+# --- claim matcher (keep identical) ---
+_ABS_PAT = re.compile(r"^(?:/|[a-z]:/)")
+
+
+def _norm_path(p: str) -> str:
+    return (p or "").replace("\\", "/").rstrip("/").lower()
+
+
+def _pat_prefix(pat: str) -> str:
+    """Literal prefix of an fnmatch pattern, normalized for comparison."""
+    return pat.replace("\\", "/").lower().split("*")[0].split("?")[0].rstrip("/")
+
+
+def _under(a: str, b: str) -> bool:
+    """Is `a` at or beneath `b`, on path boundaries. A bare startswith made
+    'src/tests' a child of 'src/test'."""
+    return bool(a) and bool(b) and (a == b or a.startswith(b + "/"))
+
+
+def _claim_glob(pat: str, base: str) -> str:
+    """One claim pattern as an absolute, normalized glob, or '' when it cannot
+    be placed on the filesystem at all.
+
+    A relative pattern means nothing without the cwd of the session that made
+    it, and matching one anyway is how a claim of 'tests/**' held by a session
+    in one repo warned on every OTHER repo's tests/ too. An unplaceable
+    pattern matches nothing: a guard that cries wolf across repositories is
+    one people learn to ignore, which costs more than the warning is worth."""
+    p = _norm_path(pat)
+    if not p:
+        return ""
+    if _ABS_PAT.match(p):
+        return p
+    while p.startswith("./"):
+        p = p[2:]
+    base = _norm_path(base)
+    return f"{base}/{p}" if base and p else ""
+
+
+def _claim_covers(fp: str, pat: str, base: str) -> bool:
+    """Does one claim pattern, made from `base`, cover one file path?"""
+    g = _claim_glob(pat, base)
+    if not g:
+        return False
+    f = _norm_path(fp)
+    if any(ch in g for ch in "*?["):
+        return fnmatch.fnmatch(f, g)
+    # No glob characters: the pattern names a file or a whole directory.
+    return _under(f, g)
+
+
+def _claims_overlap(paths_a, base_a, paths_b, base_b) -> list:
+    """Directory overlap between two claims, each pattern first resolved
+    against the cwd of the session that made it."""
+    hits = []
+    for a in paths_a or []:
+        pa = _pat_prefix(_claim_glob(a, base_a))
+        if not pa:
+            continue
+        for b in paths_b or []:
+            pb = _pat_prefix(_claim_glob(b, base_b))
+            if pb and (_under(pa, pb) or _under(pb, pa)):
+                hits.append(f"{a} ~ {b}")
+    return hits
+# --- end claim matcher ---
+
+
 def _refresh_claims_cache() -> list:
     """Snapshot every peer's work claim to a local file the edit guard can
     read without an HTTP roundtrip. Best-effort."""
@@ -191,6 +264,9 @@ def _refresh_claims_cache() -> list:
         return []
     claims = [{"name": p["name"], "desc": p["claim"].get("desc", ""),
                "paths": p["claim"].get("paths", []),
+               # Without this the guard has no base to resolve a relative
+               # pattern against, and every relative claim goes unmatched.
+               "cwd": p["claim"].get("cwd") or p.get("cwd", ""),
                "age_s": p["claim"].get("age_s"),
                "stale": bool(p["claim"].get("stale"))}
               for p in r.get("peers", []) if p.get("claim")]
@@ -201,10 +277,6 @@ def _refresh_claims_cache() -> list:
     except OSError:
         pass
     return claims
-
-
-def _pat_prefix(pat: str) -> str:
-    return pat.replace("\\", "/").lower().split("*")[0].split("?")[0].rstrip("/")
 
 
 def _ago(sec) -> str:
@@ -384,7 +456,7 @@ def cmd_guard(_args) -> int:
         me = _whoami_path(d.get("session_id", "")).read_text(encoding="utf-8").strip()
     except OSError:
         return 0  # can't tell own claim from foreign ones: stay silent
-    norm = fp.replace("\\", "/").lower()
+    norm = _norm_path(fp)
     warned = STATE_DIR / f"guard-seen-{(d.get('session_id') or 'anon')[:12]}.txt"
     try:
         seen = set(warned.read_text(encoding="utf-8").splitlines())
@@ -395,8 +467,7 @@ def cmd_guard(_args) -> int:
         if c.get("name") == me or c.get("stale"):
             continue
         for pat in c.get("paths") or []:
-            pref = _pat_prefix(pat)
-            if pref and pref in norm:
+            if _claim_covers(fp, pat, c.get("cwd", "")):
                 key = f"{c['name']}|{norm}"
                 if key not in seen:
                     hits.append((c, pat, key))
@@ -411,7 +482,8 @@ def cmd_guard(_args) -> int:
     except OSError:
         pass
     lines = [f"⚠ Cross-session work claim: {fp} falls inside «{c['desc']}» "
-             f"(pattern {pat}) claimed by the '{c['name']}' session."
+             f"(pattern {pat}{', from ' + c['cwd'] if c.get('cwd') else ''}) "
+             f"claimed by the '{c['name']}' session."
              for c, pat, _k in hits]
     ctx = ("\n".join(lines)
            + "\nIf your spec owns this file, proceed deliberately; otherwise "
